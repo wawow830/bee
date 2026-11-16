@@ -3,7 +3,7 @@
 A minimal agent harness. It speaks [ACP](https://agentclientprotocol.com) on stdio, so your editor is the UI. It gives
 the model one tool, a Python session. A session is one append-only file.
 
-Two files: `bee.ts` is the harness, `kernel.py` is the Python session.
+Three files: `bee.ts` is the harness, `kernel.py` is the Python session, `cli.ts` is a terminal for it.
 
 ## Run
 
@@ -23,6 +23,22 @@ with the path to `bee.ts` as the executable and the environment below.
 | `BEE_HOME` | Where sessions live. Without it, `~/.bee` |
 
 Model and thinking level can be changed per session from the editor, and by the model.
+
+### In a terminal
+
+Run `bee.ts` from a terminal, or with arguments, and it is a chat instead (`bun link` puts it on your path as `bee`):
+
+```sh
+bee                 # chat
+bee "fix the tests" # one prompt, then exit
+bee -c              # continue the latest session in this directory
+bee -y              # run code without asking
+```
+
+The terminal is just another editor: `cli.ts` starts `bee.ts` and speaks ACP to it. It asks before running code
+(`a` allows the rest), Ctrl-C stops a turn, and `/model` and `/thinking` change the settings, listing the choices
+without a value. What bee says goes to stdout and everything else to stderr, so `bee "…" > answer.md` keeps only the
+answer. The prompt shows how full the context is.
 
 ## How it works
 
@@ -53,4 +69,4 @@ policy of its own.
 **Instructions** come from `AGENTS.md` in `~/.bee` and in every directory from the root down to the working directory.
 They are read once, when the session is created.
 
-Left out: sub-agents, memory, plan mode, MCP, config files, a terminal UI.
+Left out: sub-agents, memory, plan mode, MCP, config files.
