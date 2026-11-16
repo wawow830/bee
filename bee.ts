@@ -153,7 +153,7 @@ async function turn(sid: string, signal: AbortSignal): Promise<string> {
     const reply = await ask(sid, signal);
     const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
     const results = [];
-    for (const call of calls) results.push(await run(sid, call, signal));
+    for (const call of calls) if (!signal.aborted) results.push(await run(sid, call, signal));
     // Written only now, so that the exchange follows any line its own code appended.
     for (const message of [reply, ...results]) append(sid, { message });
     if (reply.stopReason === "error") throw new Error(reply.errorMessage);
@@ -191,19 +191,11 @@ async function python(sid: string, call: ToolCall, signal: AbortSignal): Promise
   return value ? JSON.parse(value) : (pythons.delete(sid), { output: "The Python session died.", failed: true });
 }
 
-/** Run one tool call, if the editor allows it. Returns its result. */
+/** Run one tool call. Returns its result. */
 async function run(sid: string, call: ToolCall, signal: AbortSignal): Promise<ToolResultMessage> {
   showCall(sid, call);
-  const allow = { optionId: "allow", name: "Allow", kind: "allow_once" };
-  const reject = { optionId: "reject", name: "Reject", kind: "reject_once" };
-  const permission = { sessionId: sid, toolCall: { toolCallId: call.id }, options: [allow, reject] };
-  const { outcome } = await request("session/request_permission", permission);
-  const allowed = outcome?.optionId === "allow" && !signal.aborted;
-  if (allowed) update(sid, { sessionUpdate: "tool_call_update", toolCallId: call.id, status: "in_progress" });
   const failure = (error: Error) => ({ output: error.message, failed: true });
-  const result: Result = allowed
-    ? await python(sid, call, signal).catch(failure)
-    : failure(Error("Not run: the user declined."));
+  const result: Result = await python(sid, call, signal).catch(failure);
   const message: ToolResultMessage = {
     role: "toolResult",
     toolCallId: call.id,
@@ -222,14 +214,6 @@ async function run(sid: string, call: ToolCall, signal: AbortSignal): Promise<To
 const send = (message: object) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n");
 const update = (sessionId: string, update: object) => send({ method: "session/update", params: { sessionId, update } });
 
-const waiting = new Map<number, (result: any) => void>();
-let requests = 0;
-const request = (method: string, params: object) =>
-  new Promise<any>((resolve) => {
-    waiting.set(++requests, resolve);
-    send({ id: requests, method, params });
-  });
-
 const text = (content: string | { type: string; text?: string }[]) =>
   typeof content === "string" ? content : content.map((block) => block.text ?? "").join("");
 
@@ -246,8 +230,8 @@ const code = (call: ToolCall) => String(call.arguments.code ?? "");
 function showCall(sid: string, call: ToolCall) {
   const title = code(call).trim().split("\n")[0].replace(/^#\s*/, "").slice(0, 80) || "python";
   const content = [fenced(code(call), "python")];
-  const shown = { toolCallId: call.id, title, kind: "execute", status: "pending", rawInput: call.arguments, content };
-  update(sid, { sessionUpdate: "tool_call", ...shown });
+  const shown = { toolCallId: call.id, title, kind: "execute", status: "in_progress", content };
+  update(sid, { sessionUpdate: "tool_call", ...shown, rawInput: call.arguments });
 }
 
 function showResult(sid: string, call: ToolCall, result: ToolResultMessage) {
@@ -347,12 +331,8 @@ const handlers: Record<string, (params: any) => unknown> = {
 
 mkdirSync(SESSIONS, { recursive: true, mode: 0o700 });
 for await (const line of createInterface({ input: process.stdin })) {
-  const { id, method, params, result } = JSON.parse(line);
-  if (!method) {
-    waiting.get(id)?.(result ?? {}); // a reply to a request of ours
-    waiting.delete(id);
-    continue;
-  }
+  const { id, method, params } = JSON.parse(line);
+  if (!method) continue; // a reply, and we ask nothing
   const reply = (answer: object) => id !== undefined && send({ id, ...answer });
   const unknown = () => Promise.reject(Object.assign(new Error(`No method ${method}`), { code: -32601 }));
   Promise.resolve(params ?? {})

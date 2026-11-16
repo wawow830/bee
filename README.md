@@ -54,10 +54,7 @@ what to do. Instructions are yours, in `AGENTS.md`.
 
 **The file forgives.** A line that is not JSON, or that names no earlier line, follows the line before it.
 
-**Permissions** are the editor's. Before each call the harness asks the editor to allow or reject it, and holds no
-policy of its own.
-
 **Instructions** come from `AGENTS.md` in `~/.bee` and in every directory from the root down to the working directory.
 They are read once, when the session is created.
 
-Left out: sub-agents, memory, plan mode, MCP, config files.
+Left out: permission prompts, sub-agents, memory, plan mode, MCP, config files.
