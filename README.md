@@ -20,7 +20,6 @@ with the path to `bee.ts` as the executable and the environment below.
 | `<PROVIDER>_BASE_URL` | Send that provider's requests elsewhere, e.g. `ANTHROPIC_BASE_URL` for a proxy |
 | `BEE_MODEL` | Default model, as `provider/id`. Without it, the first available one |
 | `BEE_THINKING` | Default thinking level. Without it, `medium` |
-| `BEE_LIMIT` | Tokens at which the model is told its context is nearly full. Without it, four fifths of the window |
 | `BEE_HOME` | Where sessions live. Without it, `~/.bee` |
 
 Model and thinking level can be changed per session from the editor, and by the model.
@@ -37,17 +36,16 @@ a summary appended after line 0. A rewind is a line appended after any other. A 
 `{thinking}`, and the latest one in the file holds.
 
 **One tool.** `python` runs code in a Python process that lasts as long as the harness does. Its result is whatever the
-code and its child processes wrote, cut to 20,000 characters. When the harness restarts, the session starts empty and
-the model is told so.
+code and its child processes wrote, cut to 20,000 characters. When the harness restarts, the session starts empty.
 
-**The model runs the harness** with that tool, by appending lines to the session file. There is no API for it. The
-harness writes each reply and its results after whatever the reply's code appended, so the model continues from its
-own line and sees the call that wrote it. This is how it compacts its context, rewinds, and changes its settings.
+**The model runs the harness** with that tool, by appending lines to the session file. There is no API for it, and
+the prompt only says where the file is. The harness writes each reply and its results after whatever the reply's code
+appended, so the model continues from its own line. This is how it can compact its context, rewind, or change a setting.
 
-**The harness only reports.** When the context passes the limit it says so, once, and the model compacts.
+**The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model
+what to do. Instructions are yours, in `AGENTS.md`.
 
-**The file forgives.** A line that is not JSON, or that names no earlier line, follows the line before it. A message
-the model could not be sent is left out.
+**The file forgives.** A line that is not JSON, or that names no earlier line, follows the line before it.
 
 **Permissions** are the editor's. Before each call the harness asks the editor to allow or reject it, and holds no
 policy of its own.

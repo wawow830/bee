@@ -38,31 +38,21 @@ const SESSIONS = join(HOME, "sessions");
 const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
 const user = (content: UserMessage["content"]): UserMessage => ({ role: "user", content, timestamp: Date.now() });
 
-/** A line as written, or an empty one if it is not a JSON object. */
-function parse(text: string): Record<string, any> {
-  try {
-    const line = JSON.parse(text);
-    return line && typeof line === "object" ? line : {};
-  } catch {
-    return {};
-  }
-}
-
-/** A message the model can be sent. */
-const sound = (message: any) =>
-  ["system", "user", "assistant", "toolResult"].includes(message?.role) &&
-  (typeof message.content === "string" || Array.isArray(message.content));
-
-/** The lines. One that names no earlier line follows the line before it, and an unsound message is left out. */
+/** The lines. One that is not JSON is empty, and one that names no earlier line follows the line before it. */
 function read(sid: string): Line[] {
   if (!/^[\w-]+$/.test(sid) || !existsSync(file(sid)))
     throw Object.assign(new Error(`No session ${sid}`), { code: -32002 });
-  const texts = readFileSync(file(sid), "utf8").trimEnd().split("\n");
-  return texts.map(parse).map(({ parent, message, ...rest }, n) => ({
-    ...rest,
-    parent: n === 0 ? null : Number.isInteger(parent) && parent >= 0 && parent < n ? parent : n - 1,
-    message: sound(message) ? message : undefined,
-  }));
+  const parse = (text: string) => {
+    try {
+      return JSON.parse(text) ?? {};
+    } catch {
+      return {};
+    }
+  };
+  return readFileSync(file(sid), "utf8").trimEnd().split("\n").map(parse).map((line, n) => {
+    const earlier = Number.isInteger(line.parent) && line.parent >= 0 && line.parent < n;
+    return { ...line, parent: n === 0 ? null : earlier ? line.parent : n - 1 };
+  });
 }
 
 /** Append a line, after the last one unless it names a parent. */
@@ -104,17 +94,10 @@ const PYTHON = {
   parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
 };
 
-const FULL = "Context is nearly full";
-
 const prompt = (cwd: string, path: string) => `You are an agent in the bee harness.
 cwd: ${cwd}
-
-This session is the JSONL file ${path}. Each line is {parent, message}. parent is the number of the line it follows. \
-Line 0 is this prompt. Your context is the chain from the last line back to line 0.
-
-You control bee by appending lines to that file. To compact, append \
-{"parent": 0, "message": {"role": "user", "content": summary}}. Your context is then this prompt, the summary and the \
-call that appended it. A line with "model" or "thinking" in place of "message" changes that setting.
+session: ${path}
+Your context is the session file. You can append to it.
 
 ${instructions(cwd)}`.trim();
 
@@ -146,9 +129,6 @@ function thinking(lines: Line[]) {
   return clampThinkingLevel(model(lines), wanted as ThinkingLevel);
 }
 
-/** Tokens at which the model is told its context is nearly full: BEE_LIMIT, or four fifths of its window. */
-const limit = (lines: Line[]) => Number(process.env.BEE_LIMIT) || Math.floor(model(lines).contextWindow * 0.8);
-
 /** Tokens in the conversation after a reply, as the model counted them. */
 const count = ({ usage }: AssistantMessage) => usage.input + usage.cacheRead + usage.cacheWrite + usage.output;
 
@@ -170,24 +150,14 @@ async function ask(sid: string, signal: AbortSignal): Promise<AssistantMessage> 
 /** The loop: ask, run what it asks for, repeat until it has nothing to run. */
 async function turn(sid: string, signal: AbortSignal): Promise<string> {
   for (;;) {
-    const before = read(sid);
     const reply = await ask(sid, signal);
     const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
     const results = [];
     for (const call of calls) results.push(await run(sid, call, signal));
-    // The exchange goes in after any lines its code appended, so that it continues from them.
-    const appended = read(sid).length > before.length;
+    // Written only now, so that the exchange follows any line its own code appended.
     for (const message of [reply, ...results]) append(sid, { message });
-    const lines = read(sid);
-    const changed = ref(model(lines)) !== ref(model(before)) || thinking(lines) !== thinking(before);
-    if (changed) update(sid, { sessionUpdate: "config_option_update", configOptions: options(sid) });
     if (reply.stopReason === "error") throw new Error(reply.errorMessage);
     if (signal.aborted) return append(sid, { message: user("[The user interrupted.]") }), "cancelled";
-    // Say once when the context is nearly full. After the code appended, its size is not known until the next reply.
-    const said = (m: Message) => m.role === "user" && typeof m.content === "string" && m.content.startsWith(FULL);
-    const told = chain(lines).some(said);
-    const [used, most] = [count(reply), limit(lines)];
-    if (used > most && !told && !appended) append(sid, { message: user(`${FULL}: ${used} tokens. Compact.`) });
     if (!calls.length) return reply.stopReason === "length" ? "max_tokens" : "end_turn";
   }
 }
@@ -197,17 +167,14 @@ async function turn(sid: string, signal: AbortSignal): Promise<string> {
 // first call. It takes a line of code and answers with a line of output.
 
 type Result = { output: string; failed: boolean };
-type Python = { child: ChildProcess; replies: AsyncIterator<string>; note: string };
+type Python = { child: ChildProcess; replies: AsyncIterator<string> };
 
 const pythons = new Map<string, Python>();
 
 function start(sid: string): Python {
-  const lines = read(sid);
   const kernel = join(import.meta.dir, "kernel.py");
-  const child = spawn("python3", [kernel], { cwd: lines[0].cwd, stdio: ["pipe", "pipe", "inherit"] });
-  const replies = createInterface({ input: child.stdout! })[Symbol.asyncIterator]();
-  const ran = lines.some((line) => line.message?.role === "toolResult"); // in another Python, now gone
-  const python = { child, replies, note: ran ? "[New Python session: earlier variables are gone.]\n" : "" };
+  const child = spawn("python3", [kernel], { cwd: read(sid)[0].cwd, stdio: ["pipe", "pipe", "inherit"] });
+  const python = { child, replies: createInterface({ input: child.stdout! })[Symbol.asyncIterator]() };
   for (const end of ["exit", "error"]) child.once(end, () => pythons.delete(sid));
   pythons.set(sid, python);
   return python;
@@ -215,17 +182,13 @@ function start(sid: string): Python {
 
 async function python(sid: string, call: ToolCall, signal: AbortSignal): Promise<Result> {
   const { code } = validateToolCall([PYTHON], call);
-  const session = pythons.get(sid) ?? start(sid);
-  const interrupt = () => session.child.kill("SIGINT");
+  const { child, replies } = pythons.get(sid) ?? start(sid);
+  const interrupt = () => child.kill("SIGINT");
   signal.addEventListener("abort", interrupt);
-  session.child.stdin!.write(JSON.stringify({ code }) + "\n");
-  const { value } = await session.replies.next();
+  child.stdin!.write(JSON.stringify({ code }) + "\n");
+  const { value } = await replies.next();
   signal.removeEventListener("abort", interrupt);
-  if (!value) return pythons.delete(sid), { output: "The Python session died.", failed: true };
-  const result = JSON.parse(value);
-  const output = session.note + result.output;
-  session.note = "";
-  return { ...result, output };
+  return value ? JSON.parse(value) : (pythons.delete(sid), { output: "The Python session died.", failed: true });
 }
 
 /** Run one tool call, if the editor allows it. Returns its result. */
