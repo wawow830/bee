@@ -17,6 +17,7 @@ import {
   type ToolCall,
   type ToolResultMessage,
   type UserMessage,
+  validateToolCall,
 } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { version } from "./package.json";
@@ -29,7 +30,8 @@ console.log = console.error; // stdout carries the protocol and nothing else
 // Lines are only ever appended, so compacting and rewinding are the same act:
 // append after an earlier line. Nothing about a session lives anywhere else.
 
-type Line = { parent: number | null; message?: Message; cwd?: string; model?: string; thinking?: string };
+type Settings = { model: string; thinking: string; limit: number; output: number };
+type Line = { parent: number | null; message?: Message; cwd?: string } & Partial<Settings>;
 
 const HOME = process.env.BEE_HOME ?? join(homedir(), ".bee");
 const SESSIONS = join(HOME, "sessions");
@@ -61,20 +63,25 @@ function chain(lines: Line[]): Message[] {
   return messages;
 }
 
-/** Settings are lines too. The latest one in the file holds. */
-const setting = (lines: Line[], key: "model" | "thinking") => lines.findLast((line) => line[key])?.[key];
+/** Settings are lines too. For each, the latest line that makes sense holds. */
+function latest<T>(lines: Line[], pick: (line: Line) => T | undefined | false): T | undefined {
+  for (const line of lines.toReversed()) {
+    const value = pick(line);
+    if (value) return value;
+  }
+}
 
 // ── The model ───────────────────────────────────────────────────────────────
 
 const PYTHON = {
   name: "python",
   description:
-    "Runs Python in a persistent session. Returns stdout and stderr, and the value of a final expression. " +
-    "Output is truncated to 20,000 characters.",
+    "Runs Python in a persistent session. Returns stdout and stderr, and the value of a final expression, " +
+    "truncated to bee.output characters.",
   parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
 };
 
-const FULL = "Context is nearly full. Compact.";
+const FULL = "Context is nearly full: it is past bee.limit tokens. Compact, or raise bee.limit.";
 
 const prompt = (cwd: string) => `You are an agent in the bee harness.
 cwd: ${cwd}
@@ -82,11 +89,13 @@ cwd: ${cwd}
 This session is a JSONL file. Each line is {parent, message}. parent is the number of the line it follows. Line 0 is \
 this prompt. Your context is the chain from the last line back to line 0.
 
-\`bee\` in python:
+\`bee\` is a python module, already imported.
 bee.file                  Path of that file.
-bee.branch(parent, text)  When the call returns, appends text as a user message after line parent.
+bee.branch(parent, text)  Appends text as a user message after line parent, and this call after that.
+bee.model, bee.thinking, bee.limit, bee.output
+                          Settings. Assign to change one.
 
-To compact, bee.branch(0, summary). Your context is then this prompt and the summary.
+To compact, bee.branch(0, summary). Your context is then this prompt, the summary and that call.
 
 ${instructions(cwd)}`.trim();
 
@@ -107,28 +116,39 @@ const available = (await models.getAvailable()).map((m) => ({ ...m, baseUrl: bas
 const ref = (m: Model<Api>) => `${m.provider}/${m.id}`;
 
 function model(lines: Line[]): Model<Api> {
-  const wanted = [setting(lines, "model"), process.env.BEE_MODEL].map((r) => available.find((m) => ref(m) === r));
-  const found = wanted.find(Boolean) ?? available[0];
+  const named = (name?: string) => available.find((m) => ref(m) === name);
+  const found = latest(lines, (line) => named(line.model)) ?? named(process.env.BEE_MODEL) ?? available[0];
   if (!found) throw new Error("No model available: set a provider key such as ANTHROPIC_API_KEY.");
   return found;
 }
 
 function thinking(lines: Line[]) {
-  const wanted = setting(lines, "thinking") ?? process.env.BEE_THINKING ?? "medium";
+  const wanted = latest(lines, (line) => line.thinking) ?? process.env.BEE_THINKING ?? "medium";
   return clampThinkingLevel(model(lines), wanted as ThinkingLevel);
 }
 
-/** Tokens in the conversation, as counted by the model's last finished reply. */
-function tokens(lines: Line[]): number {
-  const finished = (m: Message) => m.role === "assistant" && !["error", "aborted"].includes(m.stopReason);
-  const usage = (chain(lines).findLast(finished) as AssistantMessage | undefined)?.usage;
-  return usage ? usage.input + usage.cacheRead + usage.cacheWrite + usage.output : 0;
-}
+const positive = (value: unknown) => Number(value) > 0 && Number(value);
 
-/** Where the model is told to compact: BEE_LIMIT tokens, or four fifths of its context window. */
-const limit = (lines: Line[]) => Number(process.env.BEE_LIMIT) || Math.floor(model(lines).contextWindow * 0.8);
+/** Tokens of context at which the model is told it is nearly full. */
+const limit = (lines: Line[]) =>
+  latest(lines, (line) => positive(line.limit)) ||
+  positive(process.env.BEE_LIMIT) ||
+  Math.floor(model(lines).contextWindow * 0.8);
 
-/** One reply from the model: streamed to the editor, appended to the session. */
+/** Characters of a call's output that go back to the model. */
+const output = (lines: Line[]) => latest(lines, (line) => positive(line.output)) || 20_000;
+
+const settings = (lines: Line[]): Settings => ({
+  model: ref(model(lines)),
+  thinking: thinking(lines),
+  limit: limit(lines),
+  output: output(lines),
+});
+
+/** Tokens in the conversation after a reply, as the model counted them. */
+const count = ({ usage }: AssistantMessage) => usage.input + usage.cacheRead + usage.cacheWrite + usage.output;
+
+/** One reply from the model, streamed to the editor. */
 async function ask(sid: string, signal: AbortSignal): Promise<AssistantMessage> {
   const lines = read(sid);
   const level = thinking(lines);
@@ -139,32 +159,40 @@ async function ask(sid: string, signal: AbortSignal): Promise<AssistantMessage> 
     if (event.type === "thinking_delta") say(sid, "agent_thought", event.delta);
   }
   const reply = await stream.result();
-  append(sid, { message: reply });
-  if (reply.stopReason === "error") throw new Error(reply.errorMessage);
-  update(sid, { sessionUpdate: "usage_update", used: tokens(read(sid)), size: model(lines).contextWindow });
+  update(sid, { sessionUpdate: "usage_update", used: count(reply), size: model(lines).contextWindow });
   return reply;
 }
 
 /** The loop: ask, run what it asks for, repeat until it has nothing to run. */
 async function turn(sid: string, signal: AbortSignal): Promise<string> {
   for (;;) {
-    const lines = read(sid);
-    if (tokens(lines) > limit(lines)) append(sid, { message: user(FULL) });
     const reply = await ask(sid, signal);
     const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
-    let branch;
-    for (const call of calls) branch = (await run(sid, call, signal)) ?? branch;
-    if (branch) append(sid, { parent: branch.parent, message: user(branch.text) });
+    const results = [];
+    for (const call of calls) results.push(await run(sid, call, signal));
+    // What the code asked for goes in first, so that the exchange that asked for it continues after it.
+    const asked = results.flatMap((result) => result.lines ?? []);
+    for (const { text, ...line } of asked) append(sid, text === undefined ? line : { ...line, message: user(text) });
+    for (const message of [reply, ...results.map((result) => result.message)]) append(sid, { message });
+    if (asked.length) update(sid, { sessionUpdate: "config_option_update", configOptions: options(sid) });
+    if (reply.stopReason === "error") throw new Error(reply.errorMessage);
     if (signal.aborted) return append(sid, { message: user("[The user interrupted.]") }), "cancelled";
+    // Say once when the context is nearly full. After a branch its size is not known until the next reply.
+    const lines = read(sid);
+    const told = chain(lines).some((message) => message.role === "user" && message.content === FULL);
+    const branched = asked.some((line) => line.parent !== undefined);
+    if (count(reply) > limit(lines) && !told && !branched) append(sid, { message: user(FULL) });
     if (!calls.length) return reply.stopReason === "length" ? "max_tokens" : "end_turn";
   }
 }
 
 // ── The tool ────────────────────────────────────────────────────────────────
 // Each session gets one Python process, a child of this one, started at its
-// first call. It takes a line of code and answers with a line of output.
+// first call. It takes code and the settings, and answers with the output and
+// the lines the code asked for: a branch, changed settings.
 
-type Result = { output: string; failed: boolean; branch?: { parent: number; text: string } };
+type Asked = Partial<Line> & { text?: string };
+type Result = { output: string; failed: boolean; lines?: Asked[] };
 type Python = { child: ChildProcess; replies: AsyncIterator<string> };
 
 const pythons = new Map<string, Python>();
@@ -178,18 +206,19 @@ function start(sid: string): Python {
   return python;
 }
 
-async function python(sid: string, code: string, signal: AbortSignal): Promise<Result> {
+async function python(sid: string, call: ToolCall, signal: AbortSignal): Promise<Result> {
+  const { code } = validateToolCall([PYTHON], call);
   const { child, replies } = pythons.get(sid) ?? start(sid);
   const interrupt = () => child.kill("SIGINT");
   signal.addEventListener("abort", interrupt);
-  child.stdin!.write(JSON.stringify({ code }) + "\n");
+  child.stdin!.write(JSON.stringify({ code, settings: settings(read(sid)) }) + "\n");
   const { value } = await replies.next();
   signal.removeEventListener("abort", interrupt);
   return value ? JSON.parse(value) : (pythons.delete(sid), { output: "The Python session died.", failed: true });
 }
 
-/** Run one tool call, if the editor allows it. Returns where the code asked to branch, if anywhere. */
-async function run(sid: string, call: ToolCall, signal: AbortSignal): Promise<Result["branch"]> {
+/** Run one tool call, if the editor allows it. Returns its result, and the lines the code asked for. */
+async function run(sid: string, call: ToolCall, signal: AbortSignal) {
   showCall(sid, call);
   const allow = { optionId: "allow", name: "Allow", kind: "allow_once" };
   const reject = { optionId: "reject", name: "Reject", kind: "reject_once" };
@@ -197,8 +226,10 @@ async function run(sid: string, call: ToolCall, signal: AbortSignal): Promise<Re
   const { outcome } = await request("session/request_permission", permission);
   const allowed = outcome?.optionId === "allow" && !signal.aborted;
   if (allowed) update(sid, { sessionUpdate: "tool_call_update", toolCallId: call.id, status: "in_progress" });
-  const declined = { output: "Not run: the user declined.", failed: true };
-  const result: Result = allowed ? await python(sid, code(call), signal) : declined;
+  const failure = (error: Error) => ({ output: error.message, failed: true });
+  const result: Result = allowed
+    ? await python(sid, call, signal).catch(failure)
+    : failure(Error("Not run: the user declined."));
   const message: ToolResultMessage = {
     role: "toolResult",
     toolCallId: call.id,
@@ -207,9 +238,8 @@ async function run(sid: string, call: ToolCall, signal: AbortSignal): Promise<Re
     isError: result.failed,
     timestamp: Date.now(),
   };
-  append(sid, { message });
   showResult(sid, call, message);
-  return result.branch;
+  return { message, lines: result.lines };
 }
 
 // ── The editor ──────────────────────────────────────────────────────────────

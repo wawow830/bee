@@ -20,10 +20,10 @@ with the path to `bee.ts` as the executable and the environment below.
 | `<PROVIDER>_BASE_URL` | Send that provider's requests elsewhere, e.g. `ANTHROPIC_BASE_URL` for a proxy |
 | `BEE_MODEL` | Default model, as `provider/id`. Without it, the first available one |
 | `BEE_THINKING` | Default thinking level. Without it, `medium` |
-| `BEE_LIMIT` | Tokens at which to compact. Without it, four fifths of the model's context window |
+| `BEE_LIMIT` | Tokens at which the model is told its context is nearly full. Without it, four fifths of the window |
 | `BEE_HOME` | Where sessions live. Without it, `~/.bee` |
 
-Model and thinking level can be changed per session from the editor.
+Model and thinking level can be changed per session from the editor, and by the model.
 
 ## How it works
 
@@ -33,17 +33,24 @@ line back to line 0, and that chain is the whole request to the model. Lines are
 no other state: it reads the file before every step.
 
 **One act does everything.** Appending a line after an earlier one continues the conversation from there. Compaction is
-a summary appended after line 0. A rewind is a line appended after any other. A setting is a line too (`{model}` or
-`{thinking}`), and the latest one in the file wins.
+a summary appended after line 0. A rewind is a line appended after any other.
+
+**Settings are lines too.** `{model}`, `{thinking}`, `{limit}` and `{output}`: for each, the latest line in the file
+holds.
 
 **One tool.** `python` runs code in a Python process that lasts as long as the harness does. Its result is whatever the
-code and its child processes wrote, cut to 20,000 characters. When the harness restarts, the session starts empty and
-the model is told so.
+code and its child processes wrote. When the harness restarts, the session starts empty and the model is told so.
 
-**The model does the one act itself.** In its Python session, `bee.file` is the session file and
-`bee.branch(parent, text)` appends `text` after line `parent`. So the model compacts its own context, with
-`bee.branch(0, summary)`. The harness only says when: once the context passes the limit, it appends "Context is nearly
-full. Compact." To compact at any other time, ask.
+**The model runs the harness.** In its Python session `bee` is a module:
+
+- `bee.file` is the session file.
+- `bee.branch(parent, text)` appends `text` as a user message after line `parent`, and the call that made it after
+  that, so the model sees what it has just done.
+- `bee.model`, `bee.thinking`, `bee.limit` and `bee.output` are the settings. Assigning to one changes it.
+
+So the model compacts its own context, with `bee.branch(0, summary)`. The harness only reports: when the context
+passes `bee.limit` tokens it says so, once, and the model compacts or raises the limit. To compact at any other time,
+ask.
 
 **Permissions** are the editor's. Before each call the harness asks the editor to allow or reject it, and holds no
 policy of its own.
