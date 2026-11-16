@@ -7,7 +7,8 @@ import { createInterface } from "node:readline";
 
 const out = process.stdout;
 const sgr = (on: number | string, off: number) => (text: string) => `\x1b[${on}m${text}\x1b[${off}m`;
-const [dim, italic, red, cyan, band] = [sgr(2, 22), sgr(3, 23), sgr(31, 39), sgr(36, 39), sgr("48;5;236", 49)];
+const [dim, italic, red, green, cyan] = [sgr(2, 22), sgr(3, 23), sgr(31, 39), sgr(32, 39), sgr(36, 39)];
+const band = sgr("48;5;236", 49);
 const width = () => out.columns - 1;
 
 const wrap = (text: string, size = width() - 2) =>
@@ -21,21 +22,28 @@ function markdown(row: string, keep = true) {
   let now = open;
   const style = () => `\x1b[0;${now.map((mark) => codes[mark]).join(";")}m`;
   const flip = (mark: string) => ((now = now.includes(mark) ? now.filter((m) => m !== mark) : [...now, mark]), style());
-  const styled = style() + row.replace(/^#+ /, "\x1b[1m").replace(/\*\*|`/g, flip) + "\x1b[0m";
+  const styled = style() + row.replace(/^#+ /, "\x1b[1m").replace(/^(\s*)[-*] /, "$1• ").replace(/\*\*|`/g, flip);
   if (keep) open = now;
-  return styled;
+  return styled + "\x1b[0m";
 }
 
-const looks: Record<string, (row: string, keep?: boolean) => string> = {
-  agent: markdown,
-  thought: (row) => dim(italic(row)),
-};
+/** Code: its first rows that do something. What it printed: the last. */
+const clip = (rows: string[], end = false) =>
+  rows.length <= 3 ? rows : end ? ["⋯", ...rows.slice(-3)] : [...rows.slice(0, 3), "⋯"];
+
+function tool(mark: string, code: string, output = "", look = dim) {
+  const doing = code.split("\n").filter((line) => line.trim() && !/^(import|from) /.test(line));
+  const lines = clip(wrap((doing.length ? doing : [code.trim()]).join("\n"))).map((row, n) => (n ? "  " : mark + " ") + cyan(row.trimEnd()));
+  return [...lines, ...(output.trim() ? clip(wrap(output.trimEnd()), true).map((row) => "  " + look(row.trimEnd())) : [])];
+}
 
 // ── Screen ──────────────────────────────────────────────────────────────────
-// Finished rows are printed once. The bottom is redrawn: the row being written, a spinner, the input, a footer.
+// Finished rows are printed once. The bottom is redrawn: the row being written, running code, a spinner with
+// what bee is thinking, the input, and a footer.
 
 let [typed, cursor] = ["", 0];
-let writing = { kind: "", row: "", rows: 0 };
+let writing = { row: "", rows: 0 };
+let [running, thinking] = ["", ""];
 let options: { id: string; currentValue: string; options: { value: string }[] }[] = [];
 let [started, frame, usage, at, empty] = [0, 0, "", 0, true];
 
@@ -46,21 +54,25 @@ const field = (text: string, size: number) =>
 function draw(printed: string[] = []) {
   const w = width();
   const [input, before] = [field(typed, w - 2), field(typed.slice(0, cursor), w - 2)];
-  const filling = writing.row.trim() ? [" " + looks[writing.kind](writing.row.trimEnd(), false)] : [];
-  const spinner = started ? cyan("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[frame % 10]) + dim(` ${Math.floor((Date.now() - started) / 1000)}s`) : "";
+  const filling = writing.row.trim() ? ["  " + markdown(writing.row.trimEnd(), false)] : [];
+  const thought = thinking.trim().split("\n").at(-1)!.slice(0, w - 12);
+  const seconds = `${Math.floor((Date.now() - started) / 1000)}s`;
+  const spinner = started ? cyan("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[frame % 10]) + " " + dim(seconds + "  " + italic(thought)) : "";
   const right = [...options.map((option) => option.currentValue.split("/").at(-1)), usage].join("  ");
   const left = process.cwd().replace(homedir(), "~").slice(0, Math.max(0, w - right.length - 2));
+  const code = running ? ["", ...tool(dim("●"), running)] : [];
   const bottom = [
     ...filling,
-    " " + spinner,
+    ...code,
+    spinner,
     dim("─".repeat(w)),
-    ...input.map((row) => " " + row),
+    ...input.map((row, n) => (n ? "  " : cyan("› ")) + row),
     dim("─".repeat(w)),
-    dim(left.padEnd(w - right.length) + right),
+    dim("  " + left.padEnd(w - right.length - 2) + right),
   ];
-  const row = filling.length + 1 + before.length;
+  const row = filling.length + code.length + 1 + before.length;
   const up = bottom.length - 1 - row;
-  const place = (up ? `\x1b[${up}A` : "") + `\x1b[${2 + before.at(-1)!.length}G`;
+  const place = (up ? `\x1b[${up}A` : "") + `\x1b[${3 + before.at(-1)!.length}G`;
   out.write(`\x1b[?2026h${clear()}${printed.map((row) => row + "\n").join("")}${bottom.join("\n")}${place}\x1b[?2026l`);
   at = row;
 }
@@ -70,34 +82,35 @@ function print(rows: string[], block = true) {
   empty = false;
 }
 
-function stream(kind: string, text: string) {
-  if (writing.kind !== kind) end();
+function stream(text: string) {
   const rows = wrap(writing.row + text);
   const first = !writing.rows;
-  writing = { kind, row: rows.pop()!, rows: writing.rows + rows.length };
-  rows.length ? print(rows.map((row) => " " + looks[kind](row.trimEnd())), first) : draw();
+  writing = { row: rows.pop()!, rows: writing.rows + rows.length };
+  thinking = "";
+  rows.length ? print(rows.map((row) => "  " + markdown(row.trimEnd())), first) : draw();
 }
 
 function end() {
-  const { kind, row, rows } = writing;
-  writing = { kind: "", row: "", rows: 0 };
-  if (row.trim()) print([" " + looks[kind](row.trimEnd())], !rows);
+  const { row, rows } = writing;
+  writing = { row: "", rows: 0 };
+  if (row.trim()) print(["  " + markdown(row.trimEnd())], !rows);
   open = [];
 }
 
-const user = (text: string) => (end(), print(wrap(text).map((row) => band(` ${row.trimEnd()}`.padEnd(width())))));
-const note = (text: string, look = dim) => (end(), print(wrap(text).map((row) => " " + look(row))));
-const bar = (rows: string[], look: (row: string) => string, block = true) =>
-  print(rows.map((row) => look("│") + " " + look(row.trimEnd())), block);
+const user = (text: string) => (end(), print(wrap(text).map((row) => band(`  ${row.trimEnd()}`.padEnd(width())))));
+const note = (text: string, look = dim) => (end(), print(wrap(text).map((row) => "  " + look(row))));
 
 const updates: Record<string, (update: any) => void> = {
   user_message_chunk: ({ content }) => user(content.text),
-  agent_message_chunk: ({ content }) => stream("agent", content.text),
-  agent_thought_chunk: ({ content }) => stream("thought", content.text),
-  tool_call: ({ rawInput }) => (end(), bar(wrap(rawInput.code.trim()), cyan)),
+  agent_message_chunk: ({ content }) => stream(content.text),
+  agent_thought_chunk: ({ content }) => ((thinking += content.text), draw()),
+  tool_call: ({ rawInput }) => (end(), ([running, thinking] = [rawInput.code, ""]), draw()),
   tool_call_update: ({ status, rawOutput }) => {
-    const rows = wrap(rawOutput?.trimEnd() ?? "");
-    if (rawOutput?.trim()) bar([...(rows.length > 10 ? ["…"] : []), ...rows.slice(-10)], status === "failed" ? red : dim, false);
+    if (status !== "completed" && status !== "failed") return;
+    const failed = status === "failed";
+    const code = running;
+    running = "";
+    print(tool(failed ? red("●") : green("●"), code, rawOutput ?? "", failed ? red : dim));
   },
   usage_update: ({ used, size }) => ((usage = `${Math.ceil((100 * used) / size)}%`), draw()),
 };
@@ -140,9 +153,9 @@ options = session.configOptions;
 
 async function prompt(text: string) {
   user(text);
-  started = Date.now();
+  [started, thinking] = [Date.now(), ""];
   const spin = setInterval(() => (frame++, draw()), 80);
-  const done = () => ((started = 0), clearInterval(spin), end());
+  const done = () => ((started = 0), (thinking = ""), clearInterval(spin), end());
   const { stopReason } = await call("session/prompt", { sessionId, prompt: [{ type: "text", text }] }).finally(done);
   if (stopReason !== "end_turn") note(stopReason);
 }
