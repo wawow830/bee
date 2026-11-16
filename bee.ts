@@ -119,17 +119,14 @@ const MODELS = join(HOME, "models.json");
 const providers: Record<string, { baseUrl?: string; apiKey?: string }> = existsSync(MODELS)
   ? JSON.parse(readFileSync(MODELS, "utf8")).providers
   : {};
-const key = async (id: string) => {
-  const { apiKey } = providers[id] ?? {};
-  return apiKey ? { type: "api_key" as const, key: apiKey } : undefined;
-};
-const list = async () => Object.keys(providers).map((providerId) => ({ providerId, type: "api_key" as const }));
 
-const models = builtinModels({ credentials: { read: key, modify: key, list, delete: async () => {} } });
-const available = (await models.getAvailable()).map((m) => ({
-  ...m,
-  baseUrl: providers[m.provider]?.baseUrl ?? m.baseUrl,
-}));
+const models = builtinModels();
+for (const [id, { apiKey, baseUrl }] of Object.entries(providers)) {
+  const provider = models.getProvider(id);
+  const resolve = async () => ({ auth: { apiKey, baseUrl }, source: MODELS });
+  if (provider) models.setProvider({ ...provider, auth: { apiKey: { name: MODELS, resolve } } });
+}
+const available = await models.getAvailable();
 const ref = (m: Model<Api>) => `${m.provider}/${m.id}`;
 
 /** The session's model: the latest one named in the file, else the first there is a key for. */
