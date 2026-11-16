@@ -22,8 +22,6 @@ import {
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { version } from "./package.json";
 
-if (process.stdin.isTTY) await import("./cli.ts"); // a person, not an editor
-
 console.log = console.error; // stdout carries the protocol and nothing else
 
 // ── Sessions ────────────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "bin": { "bee": "bee.ts" },
+  "bin": { "bee": "cli.ts" },
   "scripts": { "check": "tsc" },
   "dependencies": {
     "@earendil-works/pi-ai": "^1.5.2"
