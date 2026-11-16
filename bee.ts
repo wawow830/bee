@@ -35,7 +35,7 @@ console.log = console.error; // stdout carries the protocol and nothing else
 
 type Line = { parent: number | null; message?: Message; cwd?: string; model?: string; thinking?: string };
 
-const HOME = process.env.BEE_HOME ?? join(homedir(), ".bee");
+const HOME = process.env.BEE_HOME ?? join(homedir(), ".bee", "agent");
 const SESSIONS = join(HOME, "sessions");
 const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
 const user = (content: UserMessage["content"]): UserMessage => ({ role: "user", content, timestamp: Date.now() });
@@ -103,7 +103,7 @@ Your context is the session file. You can append to it.
 
 ${instructions(cwd)}`.trim();
 
-/** AGENTS.md from ~/.bee, then from every directory down to cwd. */
+/** AGENTS.md from ~/.bee/agent, then from every directory down to cwd. */
 function instructions(cwd: string): string {
   const dirs = [cwd];
   while (dirs[0] !== dirname(dirs[0])) dirs.unshift(dirname(dirs[0]));
@@ -114,9 +114,22 @@ function instructions(cwd: string): string {
     .join("\n\n");
 }
 
-const models = builtinModels();
-const baseUrl = (m: Model<Api>) => process.env[`${m.provider.toUpperCase().replace(/\W/g, "_")}_BASE_URL`];
-const available = (await models.getAvailable()).map((m) => ({ ...m, baseUrl: baseUrl(m) ?? m.baseUrl }));
+/** models.json, as pi writes it: {"providers": {"anthropic": {"baseUrl": "...", "apiKey": "..."}}}. */
+const MODELS = join(HOME, "models.json");
+const providers: Record<string, { baseUrl?: string; apiKey?: string }> = existsSync(MODELS)
+  ? JSON.parse(readFileSync(MODELS, "utf8")).providers
+  : {};
+const key = async (id: string) => {
+  const { apiKey } = providers[id] ?? {};
+  return apiKey ? { type: "api_key" as const, key: apiKey } : undefined;
+};
+const list = async () => Object.keys(providers).map((providerId) => ({ providerId, type: "api_key" as const }));
+
+const models = builtinModels({ credentials: { read: key, modify: key, list, delete: async () => {} } });
+const available = (await models.getAvailable()).map((m) => ({
+  ...m,
+  baseUrl: providers[m.provider]?.baseUrl ?? m.baseUrl,
+}));
 const ref = (m: Model<Api>) => `${m.provider}/${m.id}`;
 
 /** The session's model: the latest one named in the file, else the first there is a key for. */
@@ -134,16 +147,16 @@ const count = ({ usage }: AssistantMessage) => usage.input + usage.cacheRead + u
 /** One reply from the model, streamed to the editor. */
 async function ask(sid: string, signal: AbortSignal): Promise<AssistantMessage> {
   const lines = read(sid);
-  const level = thinking(lines);
+  const [using, level] = [model(lines), thinking(lines)];
   const reasoning = level === "off" ? undefined : level;
   const options = { signal, sessionId: sid, reasoning, cacheRetention: "long" as const }; // cached for an hour
-  const stream = models.streamSimple(model(lines), { messages: chain(lines) }, options);
+  const stream = models.streamSimple(using, { messages: chain(lines) }, options);
   for await (const event of stream) {
     if (event.type === "text_delta") say(sid, "agent_message", event.delta);
     if (event.type === "thinking_delta") say(sid, "agent_thought", event.delta);
   }
   const reply = await stream.result();
-  update(sid, { sessionUpdate: "usage_update", used: count(reply), size: model(lines).contextWindow });
+  update(sid, { sessionUpdate: "usage_update", used: count(reply), size: using.contextWindow });
   return reply;
 }
 
@@ -301,6 +314,7 @@ const handlers: Record<string, (params: any) => unknown> = {
   "session/load": ({ sessionId }) => (replay(sessionId), open(sessionId)),
   "session/list": ({ cwd }) => ({
     sessions: readdirSync(SESSIONS)
+      .filter((name) => name.endsWith(".jsonl"))
       .map((name) => {
         const sessionId = name.slice(0, -6);
         const lines = read(sessionId);
