@@ -94,7 +94,7 @@ const PYTHON = {
   parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
 };
 
-const prompt = (cwd: string, path: string) => `You are an agent in the bee harness.
+const prompt = (cwd: string, path: string) => `\nYou are an agent in the bee harness.
 cwd: ${cwd}
 session: ${path}
 Your context is the session file. You can append to it.
