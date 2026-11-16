@@ -32,13 +32,16 @@ Model and thinking level can be changed per session from the editor, and by the 
 
 ### In a terminal
 
-`cli.ts` is bee in a terminal (`bun link` puts it on your path as `bee`). It is just another editor: it starts
-`bee.ts` and speaks ACP to it. `bee -c` continues the latest session in the directory, and `bee "…"` starts with a
-prompt.
+`cli.ts` runs `bee.ts` and talks to it over ACP, as an editor would. `bun link` puts it on your path as `bee`.
 
-A row is printed once it is full and then scrolls away; only the row being written, your input and a status line are
-drawn again. Enter sends, Alt-Enter starts a new line, Up and Down go through what you sent, Esc stops a turn, and
-Ctrl-C clears the input or quits. Each setting is a command: `/model` lists the models, `/model <name>` picks one.
+```sh
+bee            # new session
+bee -c         # continue the latest session here
+bee "…"        # start with a prompt
+```
+
+Enter sends, Alt-Enter is a new line, Up and Down recall, Esc stops a turn, Ctrl-C clears or quits. `/model` and
+`/thinking` list their values; `/model <id>` sets one.
 
 ## How it works
 
