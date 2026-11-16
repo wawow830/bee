@@ -1,122 +1,76 @@
 // bee in a terminal. An editor like any other: it starts bee.ts and speaks ACP to it.
+// What is finished is printed once and scrolls away as usual. Only what still changes is
+// drawn again at the bottom: the line being written, the status, and your input.
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import {
-  Box,
-  CombinedAutocompleteProvider,
-  type Component,
-  Container,
-  Editor,
-  Loader,
-  Markdown,
-  matchesKey,
-  ProcessTerminal,
-  SelectList,
-  Spacer,
-  Text,
-  TuiMainScreen,
-} from "@earendil-works/pi-tui";
 import { version } from "./package.json";
 
-// ── Look ────────────────────────────────────────────────────────────────────
+const paint = (code: string) => (text: string) => text.replace(/^.*$/gm, (line) => `\x1b[${code}m${line}\x1b[0m`);
+const [plain, bold, gray, red, cyan] = [(text: string) => text, paint("1"), paint("90"), paint("31"), paint("36")];
+const styles: Record<string, (text: string) => string> = { agent: plain, thought: paint("3;90") };
 
-const style = (on: string | number, off: number) => (text: string) => `\x1b[${on}m${text}\x1b[${off}m`;
-const [bold, italic, gray, red, cyan] = [style(1, 22), style(3, 23), style(90, 39), style(31, 39), style(36, 39)];
-const shade = (rgb: string) => style(`48;2;${rgb}`, 49);
-const shades: Record<string, (text: string) => string> = {
-  user: shade("52;52;60"),
-  pending: shade("40;40;50"),
-  completed: shade("40;50;40"),
-  failed: shade("60;40;40"),
-};
-const list = { selectedPrefix: cyan, selectedText: cyan, description: gray, scrollInfo: gray, noMatch: gray };
-const plain = (text: string) => text;
-const markdown = {
-  heading: (text: string) => bold(cyan(text)),
-  ...{ link: cyan, linkUrl: gray, code: cyan, codeBlock: plain, codeBlockBorder: gray, listBullet: cyan, hr: gray },
-  ...{ quote: italic, quoteBorder: gray, bold, italic, strikethrough: style(9, 29), underline: style(4, 24) },
-};
+// ── The screen ──────────────────────────────────────────────────────────────
 
-/** The end of long output. The model sees all of it. */
+const out = process.stdout;
+let typed = ""; // your input
+let line = { kind: "", text: "" }; // the line bee is writing
+let options: { id: string; currentValue: string; options: { value: string }[] }[] = []; // bee's settings
+let [busy, frame, usage, drawn, last] = [false, 0, "", 0, ""]; // last: the kind of block printed last
+
+const fit = (text: string, room = out.columns - 3) => (text.length > room ? "…" + text.slice(1 - room) : text);
+const clear = () => (drawn > 1 ? `\r\x1b[${drawn - 1}A` : "\r") + "\x1b[J";
+
+/** Redraw the bottom, after printing what is finished, if anything. */
+function draw(printed = "") {
+  const where = process.cwd().replace(homedir(), "~");
+  const doing = busy ? "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[frame % 10] + " esc to stop" : "";
+  const live = [
+    ...(line.text ? [styles[line.kind](fit(line.text))] : []),
+    gray(fit([where, ...options.map((option) => option.currentValue), usage, doing].filter(Boolean).join(" · "))),
+    bold("› ") + fit(typed.replaceAll("\n", "↵")),
+  ];
+  out.write(`\x1b[?2026h${clear()}${printed}${live.join("\n")}\x1b[?2026l`);
+  drawn = live.length;
+}
+
+/** Print a finished block, apart from the one before unless it continues it. */
+function print(kind: string, text: string) {
+  if (line.text && line.kind !== kind) end();
+  draw((last && kind !== last ? "\n" : "") + text + "\n");
+  last = kind;
+}
+
+/** Text arrives in pieces. Each line is printed once it is whole. */
+function stream(kind: string, text: string) {
+  if (line.kind !== kind) end();
+  const lines = (line.text + text).split("\n");
+  line = { kind, text: lines.pop()! };
+  lines.length ? print(kind, styles[kind](lines.join("\n"))) : draw();
+}
+
+function end() {
+  const { kind, text } = line;
+  line = { kind: "", text: "" };
+  if (text) print(kind, styles[kind](text));
+}
+
+/** The last lines of long output. The model sees all of it. */
 function tail(text: string, keep = 10) {
-  const lines = text.trimEnd().split("\n").map((line) => (line.length > 300 ? line.slice(0, 300) + "…" : line));
-  return [...(lines.length > keep ? [`… ${lines.length - keep} earlier lines`] : []), ...lines.slice(-keep)].join("\n");
+  const lines = text.trimEnd().split("\n");
+  return [...(lines.length > keep ? [`… ${lines.length - keep} lines above`] : []), ...lines.slice(-keep)].join("\n");
 }
-
-// ── Screen ──────────────────────────────────────────────────────────────────
-// What was said, a spinner while bee works, the editor, and a footer.
-
-const tui = new TuiMainScreen(new ProcessTerminal());
-const [said, status, input, footer] = [new Container(), new Container(), new Container(), new Text("", 1, 0)];
-const working = new Loader(tui, cyan, gray, "esc to stop");
-const editor = new Editor(tui, { borderColor: gray, selectList: list }, { paddingX: 1 });
-for (const part of [said, status, input, footer]) tui.addChild(part);
-
-function add<T extends Component>(component: T): T {
-  said.addChild(new Spacer(1));
-  said.addChild(component);
-  tui.requestRender();
-  return component;
-}
-
-let usage = "";
-let streaming: { kind: string; text: string; view: Markdown } | undefined; // the block text is arriving in
-function note(text: string) {
-  streaming = undefined;
-  add(new Text(text, 1, 0));
-}
-
-function say(kind: "user" | "agent" | "thought", text: string) {
-  if (streaming?.kind !== kind || kind === "user") {
-    const look = { user: { bgColor: shades.user }, agent: {}, thought: { color: gray, italic: true } }[kind];
-    streaming = { kind, text: "", view: add(new Markdown("", 1, kind === "user" ? 1 : 0, markdown, look)) };
-  }
-  streaming.view.setText((streaming.text += text));
-  tui.requestRender();
-}
-
-const calls = new Map<string, { box: Box; output: Text }>();
 
 const updates: Record<string, (update: any) => void> = {
-  user_message_chunk: ({ content }) => say("user", content.text ?? ""), // when a session is loaded
-  agent_message_chunk: ({ content }) => say("agent", content.text ?? ""),
-  agent_thought_chunk: ({ content }) => say("thought", content.text ?? ""),
-  tool_call: ({ toolCallId, rawInput }) => {
-    const [box, output] = [new Box(1, 1, shades.pending), new Text("", 0, 0)];
-    box.addChild(new Text(cyan(String(rawInput?.code ?? "").trim()), 0, 0));
-    box.addChild(output);
-    calls.set(toolCallId, { box: add(box), output });
-    streaming = undefined;
-  },
-  tool_call_update: ({ toolCallId, status, rawOutput }) => {
-    const call = calls.get(toolCallId)!;
-    call.box.setBgFn(shades[status] ?? shades.pending);
-    if (typeof rawOutput === "string" && rawOutput.trim()) call.output.setText("\n" + gray(tail(rawOutput)));
-    tui.requestRender();
-  },
-  usage_update: ({ used, size }) => ((usage = `${Math.ceil((100 * used) / size)}%`), refresh()),
+  user_message_chunk: ({ content }) => print("user", bold(`› ${content.text?.trim()}`)), // a loaded session
+  agent_message_chunk: ({ content }) => stream("agent", content.text ?? ""),
+  agent_thought_chunk: ({ content }) => stream("thought", content.text ?? ""),
+  tool_call: ({ toolCallId, rawInput }) => print(toolCallId, cyan(String(rawInput?.code ?? "").trim())),
+  tool_call_update: ({ toolCallId, status, rawOutput }) =>
+    rawOutput?.trim() && print(toolCallId, (status === "failed" ? red : gray)(tail(rawOutput))),
+  usage_update: ({ used, size }) => ((usage = `${Math.ceil((100 * used) / size)}%`), draw()),
 };
-
-/** Ask the user to pick one, in the editor's place. */
-let dismiss: (() => void) | undefined;
-const choose = (items: { value: string; label: string }[]) =>
-  new Promise<string | null>((resolve) => {
-    const picker = new SelectList(items, items.length, list);
-    const done = (value: string | null) => {
-      dismiss = undefined;
-      input.clear();
-      input.addChild(editor);
-      tui.setFocus(editor);
-      resolve(value);
-    };
-    picker.onSelect = (item) => done(item.value);
-    picker.onCancel = dismiss = () => done(null);
-    input.clear();
-    input.addChild(picker);
-    tui.setFocus(picker);
-  });
 
 // ── bee ─────────────────────────────────────────────────────────────────────
 
@@ -132,96 +86,80 @@ const call = (method: string, params: object) =>
     send({ id: requests, method, params });
   });
 
-createInterface({ input: bee.stdout! }).on("line", async (line) => {
-  const { id, method, params, result, error } = JSON.parse(line);
+createInterface({ input: bee.stdout! }).on("line", (text) => {
+  const { id, method, params, result, error } = JSON.parse(text);
   if (method === "session/update") return updates[params.update.sessionUpdate]?.(params.update);
-  if (method === "session/request_permission") {
-    const optionId = await choose(params.options.map((o: any) => ({ value: o.optionId, label: o.name })));
-    return send({ id, result: { outcome: optionId ? { outcome: "selected", optionId } : { outcome: "cancelled" } } });
-  }
   if (method) return send({ id, error: { code: -32601, message: `No method ${method}` } });
   const { resolve, reject } = waiting.get(id)!;
   waiting.delete(id);
   error ? reject(new Error(error.message)) : resolve(result);
 });
 
-// ── Session ─────────────────────────────────────────────────────────────────
-
 function quit(message?: string) {
-  tui.stop();
-  if (message) console.error(message);
+  out.write(clear() + (message ? red(message) + "\n" : ""));
   process.exit(message ? 1 : 0);
 }
 
-const cwd = process.cwd();
+// ── The session ─────────────────────────────────────────────────────────────
+
 const must = (method: string, params: object) => call(method, params).catch((error) => quit(error.message));
-tui.start();
-await must("initialize", { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: "bee-cli", version } });
-const resume = process.argv.includes("-c");
-const latest = resume && (await must("session/list", { cwd })).sessions.find((s: any) => s.title)?.sessionId;
-const session = await must(latest ? "session/load" : "session/new", { sessionId: latest || undefined, cwd, mcpServers: [] });
+const cwd = process.cwd();
+await must("initialize", { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: "bee", version } });
+const resume = process.argv.includes("-c") && (await must("session/list", { cwd })).sessions.find((s: any) => s.title);
+const session = await must(resume ? "session/load" : "session/new", { sessionId: resume?.sessionId, cwd, mcpServers: [] });
 const sessionId: string = session.sessionId;
-let options: { id: string; currentValue: string; options: { value: string }[] }[] = session.configOptions;
-
-/** The footer and the slash commands follow the settings: each setting bee offers is a command. */
-function refresh() {
-  const where = cwd.replace(homedir(), "~");
-  footer.setText(gray([where, ...options.map((option) => option.currentValue), usage].filter(Boolean).join(" · ")));
-  const commands = options.map((option) => ({
-    name: option.id,
-    description: option.currentValue,
-    getArgumentCompletions: (prefix: string) =>
-      option.options.filter((o) => o.value.includes(prefix)).map((o) => ({ value: o.value, label: o.value })),
-  }));
-  editor.setAutocompleteProvider(new CombinedAutocompleteProvider(commands, cwd));
-  tui.requestRender();
-}
-
-async function set(line: string) {
-  const [id, value = ""] = line.slice(1).split(/\s+/);
-  const option = options.find((option) => option.id === id);
-  if (!option) return note(red(`No command /${id}`));
-  if (!option.options.some((o) => o.value === value)) return note(gray(`${id}: ${option.currentValue}`));
-  ({ configOptions: options } = await call("session/set_config_option", { sessionId, configId: id, value }));
-  refresh();
-}
-
-let busy = false;
+options = session.configOptions;
 
 async function prompt(text: string) {
-  say("user", text);
+  print("user", bold(`› ${text}`));
   busy = true;
-  status.addChild(working);
-  working.start();
+  const spin = setInterval(() => (frame++, draw()), 80);
   try {
     const { stopReason } = await call("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
-    if (stopReason !== "end_turn") note(gray(`[${stopReason}]`));
+    if (stopReason !== "end_turn") print("stop", gray(`[${stopReason}]`));
   } catch (error: any) {
-    note(red(error.message));
+    print("error", red(error.message));
   } finally {
-    [busy, streaming] = [false, undefined];
-    working.stop();
-    status.clear();
-    tui.requestRender();
+    busy = false;
+    clearInterval(spin);
+    end();
+    draw();
   }
 }
 
-// Esc stops bee. Ctrl-C clears the editor, or quits if it is empty.
-tui.addInputListener((data) => {
-  if (matchesKey(data, "escape") && busy && !editor.isShowingAutocomplete())
-    return send({ method: "session/cancel", params: { sessionId } }), dismiss?.(), { consume: true };
-  if (matchesKey(data, "ctrl+c")) return editor.getText() ? editor.setText("") : quit(), { consume: true };
-});
+/** Each setting bee offers is a command: `/model <value>` sets it, `/model` lists the values. */
+async function set(text: string) {
+  const [id, value] = text.slice(1).split(/\s+/);
+  const option = options.find((option) => option.id === id);
+  if (!option) return print("note", gray(options.map((option) => `/${option.id}`).join("  ")));
+  if (!option.options.some((o) => o.value === value))
+    return print("note", gray(option.options.map((o) => (o.value === option.currentValue ? "● " : "  ") + o.value).join("\n")));
+  options = (await call("session/set_config_option", { sessionId, configId: id, value })).configOptions;
+  draw();
+}
 
 let queue: Promise<unknown> = Promise.resolve(); // what you send while bee works waits its turn
-editor.onSubmit = (text) => {
-  if (!text) return;
-  editor.addToHistory(text);
-  queue = queue.then(() => (text.startsWith("/") ? set(text).catch((error) => note(red(error.message))) : prompt(text)));
-};
-input.addChild(editor);
-tui.setFocus(editor);
-refresh();
+const submit = (text: string) =>
+  (queue = queue.then(() => (text.startsWith("/") ? set(text) : prompt(text))).catch((error) => print("error", red(error.message))));
+
+// ── The keyboard ────────────────────────────────────────────────────────────
+// Esc stops bee, Ctrl-C clears or quits, and a return at the end sends. A paste arrives
+// in one piece, so the returns inside it are just new lines.
+
+process.stdin.setRawMode(true).setEncoding("utf8").on("data", (key: string) => {
+  if (key === "\x03") return typed ? ((typed = ""), draw()) : quit();
+  if (key === "\x1b") return busy && send({ method: "session/cancel", params: { sessionId } });
+  if (key === "\x7f") typed = [...typed].slice(0, -1).join("");
+  else if (!key.startsWith("\x1b")) typed += key.replaceAll("\r", "\n").replace(/[^\P{Cc}\n]/gu, "");
+  if (typed.endsWith("\n")) {
+    if (typed.trim()) submit(typed.trim());
+    typed = "";
+  }
+  draw();
+});
+out.on("resize", () => draw());
+
 const words = process.argv.slice(2).filter((arg) => arg !== "-c").join(" ");
-if (words) editor.onSubmit(words);
-await new Promise(() => {}); // bee.ts waits on this module, so the harness never starts here; quit() ends it
+if (words) submit(words);
+draw();
+await new Promise(() => {}); // bee.ts waits on this module, so it never starts the harness here
