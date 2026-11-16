@@ -13,8 +13,10 @@ import {
   type AssistantMessage,
   type Message,
   type Model,
+  type ThinkingLevel,
   type ToolCall,
   type ToolResultMessage,
+  type UserMessage,
 } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { version } from "./package.json";
@@ -27,12 +29,12 @@ console.log = console.error; // stdout carries the protocol and nothing else
 // Lines are only ever appended, so compacting and rewinding are the same act:
 // append after an earlier line. Nothing about a session lives anywhere else.
 
-type Line = { parent: number | null; message?: Message; [setting: string]: unknown };
+type Line = { parent: number | null; message?: Message; cwd?: string; model?: string; thinking?: string };
 
 const HOME = process.env.BEE_HOME ?? join(homedir(), ".bee");
 const SESSIONS = join(HOME, "sessions");
 const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
-const user = (content: unknown): Message => ({ role: "user", content, timestamp: Date.now() }) as Message;
+const user = (content: UserMessage["content"]): UserMessage => ({ role: "user", content, timestamp: Date.now() });
 
 function read(sid: string): Line[] {
   if (!/^[\w-]+$/.test(sid) || !existsSync(file(sid)))
@@ -40,6 +42,7 @@ function read(sid: string): Line[] {
   return readFileSync(file(sid), "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
 }
 
+/** Append a line, after the last one unless it names a parent. */
 function append(sid: string, { parent, ...rest }: Partial<Line>) {
   appendFileSync(file(sid), JSON.stringify({ parent: parent ?? read(sid).length - 1, ...rest }) + "\n");
 }
@@ -51,15 +54,15 @@ function create(cwd: string): string {
   return sid;
 }
 
-function messages(lines: Line[]): Message[] {
-  const chain: Message[] = [];
+function chain(lines: Line[]): Message[] {
+  const messages: Message[] = [];
   for (let n: number | null = lines.length - 1; n !== null; n = lines[n].parent)
-    if (lines[n].message) chain.unshift(lines[n].message!);
-  return chain;
+    if (lines[n].message) messages.unshift(lines[n].message!);
+  return messages;
 }
 
-/** Settings are lines too: the latest one in the file wins. */
-const setting = (lines: Line[], key: string) => lines.findLast((line) => key in line)?.[key] as string | undefined;
+/** Settings are lines too. The latest one in the file holds. */
+const setting = (lines: Line[], key: "model" | "thinking") => lines.findLast((line) => line[key])?.[key];
 
 // ── The model ───────────────────────────────────────────────────────────────
 
@@ -79,10 +82,11 @@ cwd: ${cwd}
 This session is a JSONL file. Each line is {parent, message}. parent is the number of the line it follows. Line 0 is \
 this prompt. Your context is the chain from the last line back to line 0.
 
+When context is nearly full, bee asks you for a summary and appends it after line 0.
+
 \`bee\` in python:
 bee.file                  Path of that file.
 bee.branch(parent, text)  When the call returns, appends text as a user message after line parent.
-                          bee.branch(0, summary) compacts.
 
 ${instructions(cwd)}`.trim();
 
@@ -109,13 +113,15 @@ function model(lines: Line[]): Model<Api> {
   return found;
 }
 
-const thinking = (lines: Line[]) =>
-  clampThinkingLevel(model(lines), (setting(lines, "thinking") ?? process.env.BEE_THINKING ?? "medium") as never);
+function thinking(lines: Line[]) {
+  const wanted = setting(lines, "thinking") ?? process.env.BEE_THINKING ?? "medium";
+  return clampThinkingLevel(model(lines), wanted as ThinkingLevel);
+}
 
-/** Tokens in the conversation, as counted by the model's last reply. */
+/** Tokens in the conversation, as counted by the model's last finished reply. */
 function tokens(lines: Line[]): number {
-  const complete = (m: Message) => m.role === "assistant" && !["error", "aborted"].includes(m.stopReason);
-  const usage = (messages(lines).findLast(complete) as AssistantMessage | undefined)?.usage;
+  const finished = (m: Message) => m.role === "assistant" && !["error", "aborted"].includes(m.stopReason);
+  const usage = (chain(lines).findLast(finished) as AssistantMessage | undefined)?.usage;
   return usage ? usage.input + usage.cacheRead + usage.cacheWrite + usage.output : 0;
 }
 
@@ -127,46 +133,37 @@ async function ask(sid: string, signal: AbortSignal): Promise<AssistantMessage> 
   const lines = read(sid);
   const level = thinking(lines);
   const options = { signal, sessionId: sid, reasoning: level === "off" ? undefined : level };
-  const stream = models.streamSimple(model(lines), { messages: messages(lines) }, options);
+  const stream = models.streamSimple(model(lines), { messages: chain(lines) }, options);
   for await (const event of stream) {
     if (event.type === "text_delta") say(sid, "agent_message", event.delta);
     if (event.type === "thinking_delta") say(sid, "agent_thought", event.delta);
   }
   const reply = await stream.result();
   append(sid, { message: reply });
-  const now = read(sid);
-  const cost = now.reduce((sum, line) => sum + ((line.message as AssistantMessage)?.usage?.cost.total ?? 0), 0);
-  const size = model(now).contextWindow;
-  update(sid, { sessionUpdate: "usage_update", used: tokens(now), size, cost: { amount: cost, currency: "USD" } });
   if (reply.stopReason === "error") throw new Error(reply.errorMessage);
+  update(sid, { sessionUpdate: "usage_update", used: tokens(read(sid)), size: model(lines).contextWindow });
   return reply;
 }
 
-/** Ask once, and run what the reply asks for. */
-async function step(sid: string, signal: AbortSignal): Promise<AssistantMessage> {
-  const reply = await ask(sid, signal);
-  const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
-  const branches = [];
-  for (const call of calls) branches.push(...(await run(sid, call, signal)));
-  for (const branch of branches) append(sid, branch);
-  return reply;
-}
-
-/** Ask for a summary, then start over from it. The model may also branch there itself. */
+/** Ask for a summary, then start over from it. */
 async function compact(sid: string, signal: AbortSignal) {
   append(sid, { message: user(COMPACT) });
-  const reply = await step(sid, signal);
-  if (reply.stopReason === "stop") append(sid, { parent: 0, message: user(text(reply.content)) });
+  const summary = text((await ask(sid, signal)).content);
+  if (summary && !signal.aborted) append(sid, { parent: 0, message: user(summary) });
 }
 
-/** The loop: step until the model has nothing more to run. */
+/** The loop: ask, run what it asks for, repeat until it has nothing to run. */
 async function turn(sid: string, signal: AbortSignal): Promise<string> {
   for (;;) {
     const lines = read(sid);
     if (tokens(lines) > limit(lines)) await compact(sid, signal);
-    const reply = await step(sid, signal);
+    const reply = await ask(sid, signal);
+    const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
+    let branch;
+    for (const call of calls) branch = (await run(sid, call, signal)) ?? branch;
+    if (branch) append(sid, { parent: branch.parent, message: user(branch.text) });
     if (signal.aborted) return append(sid, { message: user("[The user interrupted.]") }), "cancelled";
-    if (reply.stopReason !== "toolUse") return reply.stopReason === "length" ? "max_tokens" : "end_turn";
+    if (!calls.length) return reply.stopReason === "length" ? "max_tokens" : "end_turn";
   }
 }
 
@@ -175,48 +172,51 @@ async function turn(sid: string, signal: AbortSignal): Promise<string> {
 // first call. It takes a line of code and answers with a line of output.
 
 type Result = { output: string; failed: boolean; branch?: { parent: number; text: string } };
+type Python = { child: ChildProcess; replies: AsyncIterator<string> };
 
-const pythons = new Map<string, { child: ChildProcess; replies: AsyncIterator<string> }>();
+const pythons = new Map<string, Python>();
+
+function start(sid: string): Python {
+  const kernel = [join(import.meta.dir, "kernel.py"), file(sid)];
+  const child = spawn("python3", kernel, { cwd: read(sid)[0].cwd, stdio: ["pipe", "pipe", "inherit"] });
+  const python = { child, replies: createInterface({ input: child.stdout! })[Symbol.asyncIterator]() };
+  for (const end of ["exit", "error"]) child.once(end, () => pythons.delete(sid));
+  pythons.set(sid, python);
+  return python;
+}
 
 async function python(sid: string, code: string, signal: AbortSignal): Promise<Result> {
-  let note = "";
-  if (!pythons.has(sid)) {
-    const lines = read(sid);
-    const kernel = [join(import.meta.dir, "kernel.py"), file(sid)];
-    const child = spawn("python3", kernel, { cwd: lines[0].cwd as string, stdio: ["pipe", "pipe", "inherit"] });
-    for (const end of ["exit", "error"]) child.once(end, () => pythons.delete(sid));
-    pythons.set(sid, { child, replies: createInterface({ input: child.stdout! })[Symbol.asyncIterator]() });
-    const ran = lines.some((line) => line.message?.role === "toolResult");
-    if (ran) note = "[New Python session: earlier variables are gone.]\n";
-  }
-  const { child, replies } = pythons.get(sid)!;
+  const { child, replies } = pythons.get(sid) ?? start(sid);
   const interrupt = () => child.kill("SIGINT");
   signal.addEventListener("abort", interrupt);
   child.stdin!.write(JSON.stringify({ code }) + "\n");
-  const reply = (await replies.next()).value;
+  const { value } = await replies.next();
   signal.removeEventListener("abort", interrupt);
-  if (!reply) return pythons.delete(sid), { output: "The Python session died.", failed: true };
-  const result = JSON.parse(reply);
-  return { ...result, output: note + result.output };
+  return value ? JSON.parse(value) : (pythons.delete(sid), { output: "The Python session died.", failed: true });
 }
 
-/** Run one tool call, if the editor allows it. Returns the line the code asked to branch to, if any. */
-async function run(sid: string, call: ToolCall, signal: AbortSignal): Promise<Partial<Line>[]> {
+/** Run one tool call, if the editor allows it. Returns where the code asked to branch, if anywhere. */
+async function run(sid: string, call: ToolCall, signal: AbortSignal): Promise<Result["branch"]> {
   showCall(sid, call);
   const allow = { optionId: "allow", name: "Allow", kind: "allow_once" };
   const reject = { optionId: "reject", name: "Reject", kind: "reject_once" };
   const permission = { sessionId: sid, toolCall: { toolCallId: call.id }, options: [allow, reject] };
   const { outcome } = await request("session/request_permission", permission);
-  let result: Result = { output: "Not run: the user declined.", failed: true };
-  if (outcome?.optionId === "allow" && !signal.aborted) {
-    update(sid, { sessionUpdate: "tool_call_update", toolCallId: call.id, status: "in_progress" });
-    result = await python(sid, code(call), signal);
-  }
-  const content = [{ type: "text", text: result.output }];
-  const message = { role: "toolResult", toolCallId: call.id, toolName: call.name, content, isError: result.failed };
-  append(sid, { message: { ...message, timestamp: Date.now() } as Message });
-  showResult(sid, call, message as ToolResultMessage);
-  return result.branch ? [{ parent: result.branch.parent, message: user(result.branch.text) }] : [];
+  const allowed = outcome?.optionId === "allow" && !signal.aborted;
+  if (allowed) update(sid, { sessionUpdate: "tool_call_update", toolCallId: call.id, status: "in_progress" });
+  const declined = { output: "Not run: the user declined.", failed: true };
+  const result: Result = allowed ? await python(sid, code(call), signal) : declined;
+  const message: ToolResultMessage = {
+    role: "toolResult",
+    toolCallId: call.id,
+    toolName: call.name,
+    content: [{ type: "text", text: result.output }],
+    isError: result.failed,
+    timestamp: Date.now(),
+  };
+  append(sid, { message });
+  showResult(sid, call, message);
+  return result.branch;
 }
 
 // ── The editor ──────────────────────────────────────────────────────────────
@@ -262,7 +262,7 @@ function showResult(sid: string, call: ToolCall, result: ToolResultMessage) {
 
 function replay(sid: string) {
   const calls = new Map<string, ToolCall>();
-  for (const message of messages(read(sid))) {
+  for (const message of chain(read(sid))) {
     if (message.role === "user") say(sid, "user_message", text(message.content));
     if (message.role === "toolResult") showResult(sid, calls.get(message.toolCallId)!, message);
     if (message.role === "assistant")
@@ -281,14 +281,16 @@ function options(sid: string) {
     const options = values.map(([value, name]) => ({ value, name }));
     return { id, name: id[0].toUpperCase() + id.slice(1), category, type: "select", currentValue, options };
   };
-  const levels = getSupportedThinkingLevels(model(lines)).map((level) => [level, level]);
   const all = available.map((m) => [ref(m), m.name]);
-  const current = [ref(model(lines)), thinking(lines)];
-  return [select("model", "model", current[0], all), select("thinking", "thought_level", current[1], levels)];
+  const levels = getSupportedThinkingLevels(model(lines)).map((level) => [level, level]);
+  return [
+    select("model", "model", ref(model(lines)), all),
+    select("thinking", "thought_level", thinking(lines), levels),
+  ];
 }
 
 /** Prompt blocks from the editor, as content for the model. */
-const parts = (blocks: any[]) =>
+const parts = (blocks: any[]): UserMessage["content"] =>
   blocks.map((block) =>
     block.type === "image"
       ? { type: "image", data: block.data, mimeType: block.mimeType }
@@ -300,10 +302,10 @@ const parts = (blocks: any[]) =>
 const running = new Map<string, AbortController>();
 
 function open(sessionId: string) {
-  const configOptions = options(sessionId);
   const availableCommands = [{ name: "compact", description: "Summarise the session and continue from the summary" }];
-  setTimeout(() => update(sessionId, { sessionUpdate: "available_commands_update", availableCommands }));
-  return { sessionId, configOptions };
+  const commands = { sessionUpdate: "available_commands_update", availableCommands };
+  setTimeout(() => update(sessionId, commands)); // once the editor has the reply, and so the session's id
+  return { sessionId, configOptions: options(sessionId) };
 }
 
 const handlers: Record<string, (params: any) => unknown> = {

@@ -28,7 +28,7 @@ def run(code, name):
 
 
 def call(code, name):
-    """Run code. Returns whether it raised; what it wrote is in `written`."""
+    """Run code. Returns whether it raised. What it wrote is in `written`."""
     linecache.cache[name] = len(code), None, code.splitlines(True), name  # so tracebacks can quote it
     signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
@@ -41,6 +41,7 @@ def call(code, name):
         return True
     finally:
         signal.signal(signal.SIGINT, signal.SIG_IGN)
+    return False
 
 
 # The harness keeps the pipes. The session and its children get no input, and write to one file.
@@ -55,14 +56,16 @@ kernel, main = sys.modules["__main__"], types.ModuleType("__main__")
 sys.modules["__main__"] = main
 sys.path[0] = ""  # imports look in the working directory, not next to this script
 scope, bee = main.__dict__, Bee()
-scope["bee"] = sys.modules["bee"] = bee  # there without an import, and with one
+scope["bee"] = bee
+ran = any('"role":"toolResult"' in line for line in open(bee.file))  # this session has had a Python before
+note = "[New Python session: earlier variables are gone.]\n" if ran else ""
 
 for n, request in enumerate(requests):
     bee.next = None
-    failed = bool(call(json.loads(request)["code"], f"<call {n}>"))
+    failed = call(json.loads(request)["code"], f"<call {n}>")
     sys.stdout.flush(), sys.stderr.flush()
     written.seek(0)
-    output = written.read().decode(errors="replace")
+    output, note = note + written.read().decode(errors="replace"), ""
     written.seek(0), written.truncate()
     if (cut := len(output) - SHOWN) > 0:
         output = f"{output[: SHOWN // 2]}\n[{cut} characters cut]\n{output[-SHOWN // 2 :]}"
