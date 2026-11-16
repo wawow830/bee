@@ -74,7 +74,7 @@ const PYTHON = {
   parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
 };
 
-const COMPACT = "Context is nearly full. Reply with a summary to continue from.";
+const FULL = "Context is nearly full. Compact.";
 
 const prompt = (cwd: string) => `You are an agent in the bee harness.
 cwd: ${cwd}
@@ -82,11 +82,11 @@ cwd: ${cwd}
 This session is a JSONL file. Each line is {parent, message}. parent is the number of the line it follows. Line 0 is \
 this prompt. Your context is the chain from the last line back to line 0.
 
-When context is nearly full, bee asks you for a summary and appends it after line 0.
-
 \`bee\` in python:
 bee.file                  Path of that file.
 bee.branch(parent, text)  When the call returns, appends text as a user message after line parent.
+
+To compact, bee.branch(0, summary). Your context is then this prompt and the summary.
 
 ${instructions(cwd)}`.trim();
 
@@ -125,7 +125,7 @@ function tokens(lines: Line[]): number {
   return usage ? usage.input + usage.cacheRead + usage.cacheWrite + usage.output : 0;
 }
 
-/** Where to compact: BEE_LIMIT tokens, or four fifths of the model's context window. */
+/** Where the model is told to compact: BEE_LIMIT tokens, or four fifths of its context window. */
 const limit = (lines: Line[]) => Number(process.env.BEE_LIMIT) || Math.floor(model(lines).contextWindow * 0.8);
 
 /** One reply from the model: streamed to the editor, appended to the session. */
@@ -145,18 +145,11 @@ async function ask(sid: string, signal: AbortSignal): Promise<AssistantMessage> 
   return reply;
 }
 
-/** Ask for a summary, then start over from it. */
-async function compact(sid: string, signal: AbortSignal) {
-  append(sid, { message: user(COMPACT) });
-  const summary = text((await ask(sid, signal)).content);
-  if (summary && !signal.aborted) append(sid, { parent: 0, message: user(summary) });
-}
-
 /** The loop: ask, run what it asks for, repeat until it has nothing to run. */
 async function turn(sid: string, signal: AbortSignal): Promise<string> {
   for (;;) {
     const lines = read(sid);
-    if (tokens(lines) > limit(lines)) await compact(sid, signal);
+    if (tokens(lines) > limit(lines)) append(sid, { message: user(FULL) });
     const reply = await ask(sid, signal);
     const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
     let branch;
@@ -301,12 +294,7 @@ const parts = (blocks: any[]): UserMessage["content"] =>
 
 const running = new Map<string, AbortController>();
 
-function open(sessionId: string) {
-  const availableCommands = [{ name: "compact", description: "Summarise the session and continue from the summary" }];
-  const commands = { sessionUpdate: "available_commands_update", availableCommands };
-  setTimeout(() => update(sessionId, commands)); // once the editor has the reply, and so the session's id
-  return { sessionId, configOptions: options(sessionId) };
-}
+const open = (sessionId: string) => ({ sessionId, configOptions: options(sessionId) });
 
 const handlers: Record<string, (params: any) => unknown> = {
   initialize: () => ({
@@ -344,7 +332,6 @@ const handlers: Record<string, (params: any) => unknown> = {
     const abort = new AbortController();
     running.set(sessionId, abort);
     try {
-      if (text(prompt).trim() === "/compact") return await compact(sessionId, abort.signal), { stopReason: "end_turn" };
       append(sessionId, { message: user(parts(prompt)) });
       return { stopReason: await turn(sessionId, abort.signal) };
     } finally {

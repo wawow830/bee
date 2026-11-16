@@ -40,11 +40,10 @@ a summary appended after line 0. A rewind is a line appended after any other. A 
 code and its child processes wrote, cut to 20,000 characters. When the harness restarts, the session starts empty and
 the model is told so.
 
-**The model can do the one act too.** In its Python session, `bee.file` is the session file and
-`bee.branch(parent, text)` appends `text` after line `parent`.
-
-**Compaction** is a prompt and a branch: the harness asks for a summary as an ordinary turn, then appends it after
-line 0. It happens when the context passes the limit, or when you send `/compact`.
+**The model does the one act itself.** In its Python session, `bee.file` is the session file and
+`bee.branch(parent, text)` appends `text` after line `parent`. So the model compacts its own context, with
+`bee.branch(0, summary)`. The harness only says when: once the context passes the limit, it appends "Context is nearly
+full. Compact." To compact at any other time, ask.
 
 **Permissions** are the editor's. Before each call the harness asks the editor to allow or reject it, and holds no
 policy of its own.
