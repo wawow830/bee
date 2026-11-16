@@ -25,11 +25,15 @@ knows, such as `ANTHROPIC_API_KEY`, works too.
 
 | Variable | Meaning |
 | --- | --- |
-| `BEE_THINKING` | Default thinking level. Without it, `medium` |
 | `BEE_HOME` | Where bee keeps its files. Without it, `~/.bee/agent` |
 
-Model and thinking level can be changed per session from the editor, and by the model. A new session starts with the
-settings of the one used last.
+Defaults go in `~/.bee/agent/settings.json`, as a setting line. Without it, the first model with a key and `medium`:
+
+```json
+{ "model": "anthropic/claude-opus-4-5", "thinking": "high" }
+```
+
+Model and thinking level can be changed per session from the editor, and by the model.
 
 ### In a terminal
 
@@ -54,7 +58,7 @@ no other state: it reads the file before every step.
 
 **One act does everything.** Appending a line after an earlier one continues the conversation from there. Compaction is
 a summary appended after line 0. A rewind is a line appended after any other. A setting is a line too, `{model}` or
-`{thinking}`, and the latest one in the file holds. Line 0 carries those of the session used last.
+`{thinking}`, and the latest one in the file holds. Line 0 starts with those in `settings.json`.
 
 **One tool.** `python` runs code in a Python process that lasts as long as the harness does. Its result is whatever the
 code and its child processes wrote, cut to 20,000 characters.
@@ -75,4 +79,4 @@ what to do. Instructions are yours, in `AGENTS.md`.
 **Instructions** come from `AGENTS.md` in `~/.bee/agent` and in every directory from the root down to the working
 directory. They are read once, when the session is created.
 
-Left out: permission prompts, sub-agents, memory, plan mode, MCP, config files.
+Left out: permission prompts, sub-agents, memory, plan mode, MCP.
