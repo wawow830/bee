@@ -6,7 +6,8 @@
   "bin": { "bee": "bee.ts" },
   "scripts": { "check": "tsc" },
   "dependencies": {
-    "@earendil-works/pi-ai": "^1.5.2"
+    "@earendil-works/pi-ai": "^1.5.2",
+    "@earendil-works/pi-tui": "^1.5.2"
   },
   "devDependencies": {
     "@types/bun": "latest",

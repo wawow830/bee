@@ -26,19 +26,11 @@ Model and thinking level can be changed per session from the editor, and by the 
 
 ### In a terminal
 
-Run `bee.ts` from a terminal, or with arguments, and it is a chat instead (`bun link` puts it on your path as `bee`):
+Run `bee.ts` in a terminal and it is a chat, like pi or Claude Code (`bun link` puts it on your path as `bee`). `bee -c`
+continues the latest session in the directory, and `bee "…"` starts with a prompt.
 
-```sh
-bee                 # chat
-bee "fix the tests" # one prompt, then exit
-bee -c              # continue the latest session in this directory
-bee -y              # run code without asking
-```
-
-The terminal is just another editor: `cli.ts` starts `bee.ts` and speaks ACP to it. It asks before running code
-(`a` allows the rest), Ctrl-C stops a turn, and `/model` and `/thinking` change the settings, listing the choices
-without a value. What bee says goes to stdout and everything else to stderr, so `bee "…" > answer.md` keeps only the
-answer. The prompt shows how full the context is.
+The terminal is just another editor: `cli.ts` starts `bee.ts` and speaks ACP to it. It asks before running code, Esc
+stops a turn, Ctrl-C quits, and `/model` and `/thinking` change the settings. The footer shows how full the context is.
 
 ## How it works
 
