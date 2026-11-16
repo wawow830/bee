@@ -183,7 +183,7 @@ const pythons = new Map<string, Python>();
 
 function start(sid: string): Python {
   const kernel = join(import.meta.dir, "kernel.py");
-  const child = spawn("python3", [kernel], { cwd: read(sid)[0].cwd, stdio: ["pipe", "pipe", "inherit"] });
+  const child = spawn("python3", [kernel, file(sid)], { cwd: read(sid)[0].cwd, stdio: ["pipe", "pipe", "inherit"] });
   const python = { child, replies: createInterface({ input: child.stdout! })[Symbol.asyncIterator]() };
   for (const end of ["exit", "error"]) child.once(end, () => pythons.delete(sid));
   pythons.set(sid, python);
