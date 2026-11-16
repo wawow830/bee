@@ -1,56 +1,59 @@
 #!/usr/bin/env bun
 // bee in a terminal. It runs bee.ts and talks to it over ACP, as an editor would.
 import { spawn } from "node:child_process";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
 const out = process.stdout;
-const sgr = (on: string, off: string) => (text: string) => `\x1b[${on}m${text}\x1b[${off}m`;
-const [bold, dim, italic, red, green, cyan] = [sgr("1", "22"), sgr("2", "22"), sgr("3", "23"), sgr("31", "39"), sgr("32", "39"), sgr("36", "39")];
-const band = sgr("48;5;236", "49");
+const color = (code: number) => (text: string) => `\x1b[38;5;${code}m${text}\x1b[39m`;
+const [amber, light, gray, dark, red] = [color(214), color(250), color(245), color(239), color(203)];
+const [bold, italic] = [(text: string) => `\x1b[1m${text}\x1b[22m`, (text: string) => `\x1b[3m${text}\x1b[23m`];
 
 const wrap = (text: string, size = out.columns - 3) =>
   text.split("\n").flatMap((line) => line.match(new RegExp(`.{1,${size}}(?=\\s|$)\\s*|.{1,${size}}`, "g")) ?? [""]);
-const last = (rows: string[]) => (rows.length > 3 ? ["⋯", ...rows.slice(-3)] : rows);
 const markdown = (row: string) =>
   row
     .replace(/^#+ (.*)/, (_, text) => bold(text))
-    .replace(/^(\s*)[-*] /, "$1• ")
+    .replace(/^(\s*)[-*] /, (_, indent) => indent + gray("• "))
     .replace(/\*\*(.+?)\*\*/g, (_, text) => bold(text))
-    .replace(/`([^`]+)`/g, (_, text) => cyan(text));
+    .replace(/`([^`]+)`/g, (_, text) => amber(text));
 
-const tool = (mark: string, code: string, output = "", look = dim) => [
-  ...last(wrap(code.trim())).map((row, n) => (n ? "  " : mark + " ") + cyan(row)),
-  ...(output.trim() ? last(wrap(output.trimEnd())).map((row) => "  " + look(row)) : []),
-];
+/** Code and what it printed, each cut to its last rows, behind a bar. */
+function tool(code: string, output = "", look = gray) {
+  const last = (rows: string[]) => (rows.length > 4 ? ["⋯", ...rows.slice(-4)] : rows);
+  const bar = (look: (row: string) => string) => (row: string) => `  ${dark("│")} ${look(row)}`;
+  return [...last(wrap(code.replace(/^\s*\n/gm, "").trim(), out.columns - 5)).map(bar(light)), ...last(wrap(output.trimEnd(), out.columns - 5)).map(bar(look))];
+}
 
 // ── Screen ──────────────────────────────────────────────────────────────────
-// Finished rows are printed once. Below them the rest is redrawn: the row being written, running code, a spinner,
-// the input and a footer.
+// Finished rows are printed once. Below them the rest is redrawn: what bee is writing, thinking or running,
+// what you have queued, and the prompt.
 
 let [typed, cursor, row, rows, code, thought, usage] = ["", 0, "", 0, "", "", ""];
 let [frame, busy, at, empty] = [0, false, 0, true];
 let options: { id: string; currentValue: string; options: { value: string }[] }[] = [];
+const queued: string[] = []; // sent while bee works, waiting their turn
 
 const clear = () => "\r" + (at ? `\x1b[${at}A` : "") + "\x1b[J";
-const field = (text: string) => text.split("\n").flatMap((line) => line.match(new RegExp(`.{1,${out.columns - 3}}`, "g")) ?? [""]);
 
 function draw(printed: string[] = []) {
-  const rule = dim("─".repeat(out.columns - 1));
-  const right = [...options.map((option) => option.currentValue.split("/").at(-1)), usage].join("  ");
-  const left = process.cwd().replace(homedir(), "~").slice(0, out.columns - right.length - 5).padEnd(out.columns - right.length - 3);
+  const status = [...options.map((option) => option.currentValue.split("/").at(-1)), usage].join("  ");
+  const size = out.columns - status.length - 5;
+  const field = (text: string) => text.split("\n").flatMap((line) => line.match(new RegExp(`.{1,${size}}`, "g")) ?? [""]);
   const [input, before] = [field(typed), field(typed.slice(0, cursor))];
+  const mark = busy ? "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[frame % 10] : "›";
   const live = [
     ...(row.trim() ? ["  " + markdown(row)] : []),
-    ...(code ? ["", ...tool(dim("●"), code)] : []),
-    busy ? cyan("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[frame % 10]) + " " + dim(italic(thought.trim().split("\n").at(-1)!.slice(0, out.columns - 4))) : "",
+    ...(code ? ["", ...tool(code)] : []),
+    ...(busy && thought.trim() ? ["", "  " + gray(italic(thought.trim().split("\n").at(-1)!.slice(0, out.columns - 3)))] : []),
+    ...queued.map((text) => dark("› " + text.split("\n")[0].slice(0, out.columns - 3))),
+    "",
   ];
-  const bottom = [...live, rule, ...input.map((row, n) => (n ? "  " : cyan("› ")) + row), rule, dim(`  ${left}${right}`)];
-  const up = bottom.length - live.length - before.length - 1;
+  const prompt = input.map((row, n) => (n ? "  " + row : `${amber(mark)} ${row.padEnd(size)}  ${dark(status)}`));
+  const up = input.length - before.length;
   const cursorAt = (up ? `\x1b[${up}A` : "") + `\x1b[${3 + before.at(-1)!.length}G`;
-  out.write(`\x1b[?2026h${clear()}${printed.map((row) => row + "\n").join("")}${bottom.join("\n")}${cursorAt}\x1b[?2026l`);
-  at = live.length + before.length;
+  out.write(`\x1b[?2026h${clear()}${printed.map((row) => row + "\n").join("")}${[...live, ...prompt].join("\n")}${cursorAt}\x1b[?2026l`);
+  at = live.length + before.length - 1;
 }
 
 function print(lines: string[], block = true) {
@@ -73,9 +76,9 @@ function end() {
   if (rest.trim()) print(["  " + markdown(rest)], first);
 }
 
-const block = (text: string, look: (row: string) => string) => (end(), print(wrap(text).map(look)));
-const user = (text: string) => block(text, (row) => band(`  ${row}`.padEnd(out.columns - 1)));
-const note = (text: string, look = dim) => block(text, (row) => "  " + look(row));
+const block = (text: string, look: (row: string, n: number) => string) => (end(), print(wrap(text).map(look)));
+const user = (text: string) => block(text, (row, n) => (n ? "  " : amber("› ")) + row);
+const note = (text: string, look = gray) => block(text, (row) => "  " + look(row));
 
 const updates: Record<string, (update: any) => void> = {
   user_message_chunk: ({ content }) => user(content.text),
@@ -84,10 +87,9 @@ const updates: Record<string, (update: any) => void> = {
   tool_call: ({ rawInput }) => (end(), ([code, thought] = [rawInput.code, ""]), draw()),
   tool_call_update: ({ status, rawOutput }) => {
     if (status !== "completed" && status !== "failed") return;
-    const failed = status === "failed";
     const ran = code;
     code = "";
-    print(tool(failed ? red("●") : green("●"), ran, rawOutput, failed ? red : dim));
+    print(tool(ran, rawOutput, status === "failed" ? red : gray));
   },
   usage_update: ({ used, size }) => ((usage = `${Math.ceil((100 * used) / size)}%`), draw()),
 };
@@ -148,8 +150,12 @@ async function set(text: string) {
 }
 
 let queue = Promise.resolve();
-const submit = (text: string) =>
-  (queue = queue.then(() => (text.startsWith("/") ? set(text) : prompt(text))).catch((error) => note(error.message, red)));
+function submit(text: string) {
+  queued.push(text);
+  queue = queue
+    .then(() => (queued.shift(), text.startsWith("/") ? set(text) : prompt(text)))
+    .catch((error) => note(error.message, red));
+}
 
 // ── Keyboard ────────────────────────────────────────────────────────────────
 
