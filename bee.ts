@@ -119,12 +119,9 @@ const baseUrl = (m: Model<Api>) => process.env[`${m.provider.toUpperCase().repla
 const available = (await models.getAvailable()).map((m) => ({ ...m, baseUrl: baseUrl(m) ?? m.baseUrl }));
 const ref = (m: Model<Api>) => `${m.provider}/${m.id}`;
 
-function model(lines: Line[]): Model<Api> {
-  const named = (name?: string) => available.find((m) => ref(m) === name);
-  const found = latest(lines, (line) => named(line.model)) ?? named(process.env.BEE_MODEL) ?? available[0];
-  if (!found) throw new Error("No model available: set a provider key such as ANTHROPIC_API_KEY.");
-  return found;
-}
+/** The session's model: the latest one named in the file, else the first there is a key for. */
+const model = (lines: Line[]) =>
+  latest(lines, (line) => available.find((m) => ref(m) === line.model)) ?? available[0];
 
 function thinking(lines: Line[]) {
   const wanted = latest(lines, (line) => line.thinking) ?? process.env.BEE_THINKING ?? "medium";
@@ -276,6 +273,7 @@ function replay(sid: string) {
 
 /** The settings, as the editor shows them. Each one's id is its key in a line. */
 function options(sid: string) {
+  if (!available.length) throw Object.assign(new Error("No provider key is set."), { code: -32000 });
   const lines = read(sid);
   const select = (id: string, category: string, currentValue: string, values: string[][]) => {
     const options = values.map(([value, name]) => ({ value, name }));

@@ -18,7 +18,6 @@ with the path to `bee.ts` as the executable and the environment below.
 | --- | --- |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, … | Any key [pi-ai](https://www.npmjs.com/package/@earendil-works/pi-ai) knows makes that provider's models available |
 | `<PROVIDER>_BASE_URL` | Send that provider's requests elsewhere, e.g. `ANTHROPIC_BASE_URL` for a proxy |
-| `BEE_MODEL` | Default model, as `provider/id`. Without it, the first available one |
 | `BEE_THINKING` | Default thinking level. Without it, `medium` |
 | `BEE_HOME` | Where sessions live. Without it, `~/.bee` |
 
