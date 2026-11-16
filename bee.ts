@@ -136,7 +136,8 @@ const count = ({ usage }: AssistantMessage) => usage.input + usage.cacheRead + u
 async function ask(sid: string, signal: AbortSignal): Promise<AssistantMessage> {
   const lines = read(sid);
   const level = thinking(lines);
-  const options = { signal, sessionId: sid, reasoning: level === "off" ? undefined : level };
+  const reasoning = level === "off" ? undefined : level;
+  const options = { signal, sessionId: sid, reasoning, cacheRetention: "long" as const }; // cached for an hour
   const stream = models.streamSimple(model(lines), { messages: chain(lines) }, options);
   for await (const event of stream) {
     if (event.type === "text_delta") say(sid, "agent_message", event.delta);
