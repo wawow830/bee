@@ -55,7 +55,7 @@ kernel, main = sys.modules["__main__"], types.ModuleType("__main__")
 sys.modules["__main__"] = main
 sys.path[0] = ""  # imports look in the working directory, not next to this script
 scope, bee = main.__dict__, Bee()
-scope["bee"] = bee
+scope["bee"] = sys.modules["bee"] = bee  # there without an import, and with one
 
 for n, request in enumerate(requests):
     bee.next = None

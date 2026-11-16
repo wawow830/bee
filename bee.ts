@@ -71,9 +71,7 @@ const PYTHON = {
   parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
 };
 
-const COMPACT =
-  "Context is nearly full. Reply with only a summary to continue from: the task, what is done, what to do next, " +
-  "and the files and variables that matter. Do not call python.";
+const COMPACT = "Context is nearly full. Reply with a summary to continue from.";
 
 const prompt = (cwd: string) => `You are an agent in the bee harness.
 cwd: ${cwd}
@@ -144,25 +142,31 @@ async function ask(sid: string, signal: AbortSignal): Promise<AssistantMessage> 
   return reply;
 }
 
-/** Ask for a summary, then start over from it. */
+/** Ask once, and run what the reply asks for. */
+async function step(sid: string, signal: AbortSignal): Promise<AssistantMessage> {
+  const reply = await ask(sid, signal);
+  const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
+  const branches = [];
+  for (const call of calls) branches.push(...(await run(sid, call, signal)));
+  for (const branch of branches) append(sid, branch);
+  return reply;
+}
+
+/** Ask for a summary, then start over from it. The model may also branch there itself. */
 async function compact(sid: string, signal: AbortSignal) {
   append(sid, { message: user(COMPACT) });
-  const reply = await ask(sid, signal);
+  const reply = await step(sid, signal);
   if (reply.stopReason === "stop") append(sid, { parent: 0, message: user(text(reply.content)) });
 }
 
-/** The loop: ask, run what it asks for, repeat until it has nothing to run. */
+/** The loop: step until the model has nothing more to run. */
 async function turn(sid: string, signal: AbortSignal): Promise<string> {
   for (;;) {
     const lines = read(sid);
     if (tokens(lines) > limit(lines)) await compact(sid, signal);
-    const reply = await ask(sid, signal);
-    const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
-    const branches = [];
-    for (const call of calls) branches.push(...(await run(sid, call, signal)));
-    for (const branch of branches) append(sid, branch);
+    const reply = await step(sid, signal);
     if (signal.aborted) return append(sid, { message: user("[The user interrupted.]") }), "cancelled";
-    if (!calls.length) return reply.stopReason === "length" ? "max_tokens" : "end_turn";
+    if (reply.stopReason !== "toolUse") return reply.stopReason === "length" ? "max_tokens" : "end_turn";
   }
 }
 
