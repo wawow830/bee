@@ -1,9 +1,8 @@
 #!/usr/bin/env bun
 // bee: a minimal agent harness. ACP on stdio, one tool, one append-only file per session.
-import { spawnSync } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { connect } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -23,42 +22,40 @@ import { version } from "./package.json";
 console.log = console.error; // stdout carries the protocol and nothing else
 
 // ── Sessions ────────────────────────────────────────────────────────────────
-// A session is a file of lines. Every line hangs under a parent, and the
-// conversation is the path from the last line back to the root. Lines are only
-// ever appended, so compacting, rewinding and forking are all the same act:
-// append under an earlier parent. Nothing about a session lives anywhere else.
+// A session is a file of lines. Each line follows a parent, named by its line
+// number, and the conversation is the chain from the last line back to line 0.
+// Lines are only ever appended, so compacting and rewinding are the same act:
+// append after an earlier line. Nothing about a session lives anywhere else.
 
-type Line = { id: string; parent: string | null; message?: Message; [setting: string]: unknown };
+type Line = { parent: number | null; message?: Message; [setting: string]: unknown };
 
 const HOME = process.env.BEE_HOME ?? join(homedir(), ".bee");
 const SESSIONS = join(HOME, "sessions");
-const stem = (sid: string) => join(SESSIONS, sid); // .jsonl the lines, .sock and .out the Python session
-const id = () => randomUUID().slice(0, 8);
+const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
 const user = (content: unknown): Message => ({ role: "user", content, timestamp: Date.now() }) as Message;
 
 function read(sid: string): Line[] {
-  if (!/^[\w-]+$/.test(sid) || !existsSync(stem(sid) + ".jsonl"))
+  if (!/^[\w-]+$/.test(sid) || !existsSync(file(sid)))
     throw Object.assign(new Error(`No session ${sid}`), { code: -32002 });
-  return readFileSync(stem(sid) + ".jsonl", "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
+  return readFileSync(file(sid), "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
 }
 
 function append(sid: string, { parent, ...rest }: Partial<Line>) {
-  const line = { id: id(), parent: parent ?? read(sid).at(-1)!.id, ...rest };
-  appendFileSync(stem(sid) + ".jsonl", JSON.stringify(line) + "\n");
+  appendFileSync(file(sid), JSON.stringify({ parent: parent ?? read(sid).length - 1, ...rest }) + "\n");
 }
 
 function create(cwd: string): string {
-  const [sid, root] = [randomUUID(), id()];
-  const message = { role: "system", content: prompt(cwd, root), toolsAdded: [PYTHON], timestamp: Date.now() };
-  appendFileSync(stem(sid) + ".jsonl", JSON.stringify({ id: root, parent: null, cwd, message }) + "\n");
+  const sid = randomUUID();
+  const message = { role: "system", content: prompt(cwd), toolsAdded: [PYTHON], timestamp: Date.now() };
+  appendFileSync(file(sid), JSON.stringify({ parent: null, cwd, message }) + "\n");
   return sid;
 }
 
 function messages(lines: Line[]): Message[] {
-  const byId = new Map(lines.map((line) => [line.id, line]));
-  const path: Message[] = [];
-  for (let line = lines.at(-1); line; line = byId.get(line.parent!)) if (line.message) path.unshift(line.message);
-  return path;
+  const chain: Message[] = [];
+  for (let n: number | null = lines.length - 1; n !== null; n = lines[n].parent)
+    if (lines[n].message) chain.unshift(lines[n].message!);
+  return chain;
 }
 
 /** Settings are lines too: the latest one in the file wins. */
@@ -69,46 +66,25 @@ const setting = (lines: Line[], key: string) => lines.findLast((line) => key in 
 const PYTHON = {
   name: "python",
   description:
-    "Run Python in a session that stays open: variables, imports, functions and processes persist between calls. " +
-    "Returns what the code and its child processes write to stdout and stderr. The value of a final expression is " +
-    "printed, as in a REPL. Output over 20,000 characters is cut in the middle; bee.out holds all of it.",
-  parameters: {
-    type: "object",
-    properties: { code: { type: "string", description: "Python source. The user sees its first line as the title." } },
-    required: ["code"],
-  },
+    "Runs Python in a persistent session. Returns stdout and stderr, and the value of a final expression. " +
+    "Output is truncated to 20,000 characters.",
+  parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
 };
 
 const COMPACT =
-  "Your context is nearly full. Reply with only a summary of this conversation that you could continue the work " +
-  "from: what the user asked for, what is done, what remains, and which files and which variables in your Python " +
-  "session matter. Do not call the tool.";
+  "Context is nearly full. Reply with only a summary to continue from: the task, what is done, what to do next, " +
+  "and the files and variables that matter. Do not call python.";
 
-const prompt = (cwd: string, root: string) => `You are an agent in the bee harness.
+const prompt = (cwd: string) => `You are an agent in the bee harness.
 cwd: ${cwd}
 
-\`bee\` is the harness, as an object in your Python session.
+This session is a JSONL file. Each line is {parent, message}. parent is the number of the line it follows. Line 0 is \
+this prompt. Your context is the chain from the last line back to line 0.
 
-bee.file
-    This session: a JSONL file, one line per message, each {id, parent, message}.
-    The first line is this prompt, id "${root}". Your context is the path from the last line back to the first.
-    Lines are only ever added.
-
-bee.append(text=None, parent=None, **settings)
-    Adds a line when the current call returns. The session continues from it.
-    text      a user message
-    parent    id of the line to add under; by default the last line
-    settings  model="provider/id", thinking="off|minimal|low|medium|high"; they hold until changed
-    bee.append(summary, parent="${root}") compacts: your context becomes this prompt and the summary.
-
-bee.tokens, bee.limit
-    Tokens in your context, and the number at which bee compacts it for you.
-
-bee.mcp
-    MCP servers the editor offers.
-
-bee.out
-    All the output of the last call.
+\`bee\` in python:
+bee.file                  Path of that file.
+bee.branch(parent, text)  When the call returns, appends text as a user message after line parent.
+                          bee.branch(0, summary) compacts.
 
 ${instructions(cwd)}`.trim();
 
@@ -119,7 +95,7 @@ function instructions(cwd: string): string {
   return [HOME, ...dirs]
     .map((dir) => join(dir, "AGENTS.md"))
     .filter(existsSync)
-    .map((file) => `<file path="${file}">\n${readFileSync(file, "utf8").trim()}\n</file>`)
+    .map((path) => `<file path="${path}">\n${readFileSync(path, "utf8").trim()}\n</file>`)
     .join("\n\n");
 }
 
@@ -168,12 +144,11 @@ async function ask(sid: string, signal: AbortSignal): Promise<AssistantMessage> 
   return reply;
 }
 
-/** Ask for a summary, then start over from it under the root. */
+/** Ask for a summary, then start over from it. */
 async function compact(sid: string, signal: AbortSignal) {
-  const root = read(sid)[0].id;
   append(sid, { message: user(COMPACT) });
   const reply = await ask(sid, signal);
-  if (reply.stopReason === "stop") append(sid, { parent: root, message: user(text(reply.content)) });
+  if (reply.stopReason === "stop") append(sid, { parent: 0, message: user(text(reply.content)) });
 }
 
 /** The loop: ask, run what it asks for, repeat until it has nothing to run. */
@@ -183,61 +158,52 @@ async function turn(sid: string, signal: AbortSignal): Promise<string> {
     if (tokens(lines) > limit(lines)) await compact(sid, signal);
     const reply = await ask(sid, signal);
     const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
-    const next = [];
-    for (const call of calls) next.push(...(await run(sid, call, signal)));
-    for (const line of next) append(sid, line);
-    if (next.length) update(sid, { sessionUpdate: "config_option_update", configOptions: options(sid) });
+    const branches = [];
+    for (const call of calls) branches.push(...(await run(sid, call, signal)));
+    for (const branch of branches) append(sid, branch);
     if (signal.aborted) return append(sid, { message: user("[The user interrupted.]") }), "cancelled";
     if (!calls.length) return reply.stopReason === "length" ? "max_tokens" : "end_turn";
   }
 }
 
 // ── The tool ────────────────────────────────────────────────────────────────
-// The Python session is its own process, so that it outlives this one. Each
-// call is one connection: it greets with its pid, takes the code, and answers
-// with the output and any lines the code asked to append.
+// Each session gets one Python process, a child of this one, started at its
+// first call. It takes a line of code and answers with a line of output.
 
-type Result = { output: string; failed: boolean; lines: { text?: string; parent?: string }[] };
+type Result = { output: string; failed: boolean; branch?: { parent: number; text: string } };
 
-function dial(sid: string, launched = false): Promise<ReturnType<typeof connect>> {
-  return new Promise((resolve, reject) => {
-    const socket = connect(stem(sid) + ".sock");
-    socket.once("connect", () => resolve(socket));
-    socket.once("error", (error) => {
-      if (launched) return reject(error);
-      // Its own systemd scope where there is one, so that stopping the editor's agent leaves it running.
-      const scope = 'systemd-run --user --scope --quiet --collect --unit="bee-$0"';
-      const kernel = ["python3", join(import.meta.dir, "kernel.py"), stem(sid)];
-      const launch = `${scope} -- "$@" 2>/dev/null || exec "$@"`;
-      spawnSync("sh", ["-c", launch, sid, ...kernel], { cwd: read(sid)[0].cwd as string, stdio: "ignore" });
-      dial(sid, true).then(resolve, reject);
-    });
-  });
-}
+const pythons = new Map<string, { child: ChildProcess; replies: AsyncIterator<string> }>();
 
 async function python(sid: string, code: string, signal: AbortSignal): Promise<Result> {
-  const socket = await dial(sid);
-  const replies = createInterface({ input: socket })[Symbol.asyncIterator]();
-  const { pid } = JSON.parse((await replies.next()).value ?? "{}");
-  const interrupt = () => process.kill(pid, "SIGINT");
+  let note = "";
+  if (!pythons.has(sid)) {
+    const lines = read(sid);
+    const kernel = [join(import.meta.dir, "kernel.py"), file(sid)];
+    const child = spawn("python3", kernel, { cwd: lines[0].cwd as string, stdio: ["pipe", "pipe", "inherit"] });
+    for (const end of ["exit", "error"]) child.once(end, () => pythons.delete(sid));
+    pythons.set(sid, { child, replies: createInterface({ input: child.stdout! })[Symbol.asyncIterator]() });
+    const ran = lines.some((line) => line.message?.role === "toolResult");
+    if (ran) note = "[New Python session: earlier variables are gone.]\n";
+  }
+  const { child, replies } = pythons.get(sid)!;
+  const interrupt = () => child.kill("SIGINT");
   signal.addEventListener("abort", interrupt);
-  const lines = read(sid);
-  const bee = { tokens: tokens(lines), limit: limit(lines), mcp: mcp.get(sid) };
-  socket.write(JSON.stringify({ code, bee }) + "\n");
+  child.stdin!.write(JSON.stringify({ code }) + "\n");
   const reply = (await replies.next()).value;
   signal.removeEventListener("abort", interrupt);
-  socket.end();
-  return reply ? JSON.parse(reply) : { output: "The Python session died.", failed: true, lines: [] };
+  if (!reply) return pythons.delete(sid), { output: "The Python session died.", failed: true };
+  const result = JSON.parse(reply);
+  return { ...result, output: note + result.output };
 }
 
-/** Run one tool call, if the editor allows it. Returns the lines the code asked to append. */
+/** Run one tool call, if the editor allows it. Returns the line the code asked to branch to, if any. */
 async function run(sid: string, call: ToolCall, signal: AbortSignal): Promise<Partial<Line>[]> {
   showCall(sid, call);
   const allow = { optionId: "allow", name: "Allow", kind: "allow_once" };
   const reject = { optionId: "reject", name: "Reject", kind: "reject_once" };
   const permission = { sessionId: sid, toolCall: { toolCallId: call.id }, options: [allow, reject] };
   const { outcome } = await request("session/request_permission", permission);
-  let result: Result = { output: "Not run: the user declined.", failed: true, lines: [] };
+  let result: Result = { output: "Not run: the user declined.", failed: true };
   if (outcome?.optionId === "allow" && !signal.aborted) {
     update(sid, { sessionUpdate: "tool_call_update", toolCallId: call.id, status: "in_progress" });
     result = await python(sid, code(call), signal);
@@ -246,11 +212,7 @@ async function run(sid: string, call: ToolCall, signal: AbortSignal): Promise<Pa
   const message = { role: "toolResult", toolCallId: call.id, toolName: call.name, content, isError: result.failed };
   append(sid, { message: { ...message, timestamp: Date.now() } as Message });
   showResult(sid, call, message as ToolResultMessage);
-  return result.lines.map(({ text, parent, ...settings }) => ({
-    ...settings,
-    parent: parent ?? undefined,
-    message: text ? user(text) : undefined,
-  }));
+  return result.branch ? [{ parent: result.branch.parent, message: user(result.branch.text) }] : [];
 }
 
 // ── The editor ──────────────────────────────────────────────────────────────
@@ -275,14 +237,14 @@ const say = (sid: string, who: "user_message" | "agent_message" | "agent_thought
 
 function fenced(text: string, language = "") {
   const fence = "`".repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map((run) => run[0].length + 1)));
-  return { type: "content", content: { type: "text", text: `${fence}${language}\n${text.trimEnd()}\n${fence}` } };
+  return { type: "content", content: { type: "text", text: `${fence}${language}\n${text.trim()}\n${fence}` } };
 }
 
 const code = (call: ToolCall) => String(call.arguments.code ?? "");
 
 function showCall(sid: string, call: ToolCall) {
   const title = code(call).trim().split("\n")[0].replace(/^#\s*/, "").slice(0, 80) || "python";
-  const content = [fenced(code(call).trim(), "python")];
+  const content = [fenced(code(call), "python")];
   const shown = { toolCallId: call.id, title, kind: "execute", status: "pending", rawInput: call.arguments, content };
   update(sid, { sessionUpdate: "tool_call", ...shown });
 }
@@ -290,7 +252,7 @@ function showCall(sid: string, call: ToolCall) {
 function showResult(sid: string, call: ToolCall, result: ToolResultMessage) {
   const status = result.isError ? "failed" : "completed";
   const output = text(result.content).trim();
-  const content = [fenced(code(call).trim(), "python"), ...(output ? [fenced(output)] : [])];
+  const content = [fenced(code(call), "python"), ...(output ? [fenced(output)] : [])];
   update(sid, { sessionUpdate: "tool_call_update", toolCallId: call.id, status, content, rawOutput: output });
 }
 
@@ -331,13 +293,11 @@ const parts = (blocks: any[]) =>
         : { type: "text", text: block.text ?? block.uri ?? "" },
   );
 
-const mcp = new Map<string, unknown[]>(); // what the editor offers this connection
 const running = new Map<string, AbortController>();
 
-function open(sessionId: string, servers: unknown[] = []) {
+function open(sessionId: string) {
   const configOptions = options(sessionId);
-  mcp.set(sessionId, servers);
-  const availableCommands = [{ name: "compact", description: "Summarise the conversation and continue from that" }];
+  const availableCommands = [{ name: "compact", description: "Summarise the session and continue from the summary" }];
   setTimeout(() => update(sessionId, { sessionUpdate: "available_commands_update", availableCommands }));
   return { sessionId, configOptions };
 }
@@ -353,17 +313,16 @@ const handlers: Record<string, (params: any) => unknown> = {
       sessionCapabilities: { list: {}, resume: {} },
     },
   }),
-  "session/new": ({ cwd, mcpServers }) => open(create(cwd), mcpServers),
-  "session/resume": ({ sessionId, mcpServers }) => open(sessionId, mcpServers),
-  "session/load": ({ sessionId, mcpServers }) => (replay(sessionId), open(sessionId, mcpServers)),
+  "session/new": ({ cwd }) => open(create(cwd)),
+  "session/resume": ({ sessionId }) => open(sessionId),
+  "session/load": ({ sessionId }) => (replay(sessionId), open(sessionId)),
   "session/list": ({ cwd }) => ({
     sessions: readdirSync(SESSIONS)
-      .filter((file) => file.endsWith(".jsonl"))
-      .map((file) => {
-        const sessionId = file.slice(0, -6);
+      .map((name) => {
+        const sessionId = name.slice(0, -6);
         const lines = read(sessionId);
         const title = text(lines.find((line) => line.message?.role === "user")?.message?.content ?? "").slice(0, 80);
-        const updatedAt = statSync(join(SESSIONS, file)).mtime.toISOString();
+        const updatedAt = statSync(file(sessionId)).mtime.toISOString();
         return { sessionId, cwd: lines[0].cwd, title: title || undefined, updatedAt };
       })
       .filter((session) => !cwd || session.cwd === cwd)
@@ -405,3 +364,4 @@ for await (const line of createInterface({ input: process.stdin })) {
       (error) => reply({ error: { code: error.code ?? -32603, message: error.message } }),
     );
 }
+process.exit(); // the editor hung up; the Python sessions go with us

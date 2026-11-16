@@ -1,7 +1,7 @@
 # bee
 
 A minimal agent harness. It speaks [ACP](https://agentclientprotocol.com) on stdio, so your editor is the UI. It gives
-the model one tool, a Python session that stays open. A session is one append-only file.
+the model one tool, a Python session. A session is one append-only file.
 
 Two files: `bee.ts` is the harness, `kernel.py` is the Python session.
 
@@ -27,30 +27,24 @@ Model and thinking level can be changed per session from the editor.
 
 ## How it works
 
-**A session is a file.** `~/.bee/sessions/<id>.jsonl` holds one line per message, each `{id, parent, message}`. The
-first line is the system prompt. The conversation is the path from the last line back to the first, and that path is the
-whole request to the model. Lines are only appended, and the harness keeps no other state: it reads the file before
-every step.
+**A session is a file.** `~/.bee/sessions/<id>.jsonl` holds one line per message, each `{parent, message}`, where
+`parent` is the number of the line it follows. Line 0 is the system prompt. The conversation is the chain from the last
+line back to line 0, and that chain is the whole request to the model. Lines are only appended, and the harness keeps
+no other state: it reads the file before every step.
 
-**One act does everything.** Appending a line under an earlier parent continues the conversation from there. Compaction
-is that act with a summary under the first line; a rewind is that act under any other line. A setting is a line too
-(`{model}` or `{thinking}`), and the latest one in the file wins.
+**One act does everything.** Appending a line after an earlier one continues the conversation from there. Compaction is
+a summary appended after line 0. A rewind is a line appended after any other. A setting is a line too (`{model}` or
+`{thinking}`), and the latest one in the file wins.
 
-**One tool.** `python` runs code in a Python process that belongs to the session, not to the harness. It keeps running
-when the harness or the editor stops, so variables, functions and started processes are still there on resume. It exits
-after a day without calls. Everything it writes goes to `<id>.out`; a call's result is what was written during the call,
-cut to 20,000 characters.
+**One tool.** `python` runs code in a Python process that lasts as long as the harness does. Its result is whatever the
+code and its child processes wrote, cut to 20,000 characters. When the harness restarts, the session starts empty and
+the model is told so.
 
-**If the Python process dies**, the next call starts a new one that re-runs the imports and definitions from the session
-file, reloads the variables it could save after the last call (`<id>.pkl`), and tells the model which names came back
-and which did not. Open files, threads and child processes do not come back.
+**The model can do the one act too.** In its Python session, `bee.file` is the session file and
+`bee.branch(parent, text)` appends `text` after line `parent`.
 
-**The model controls the harness** through `bee` in its session: `bee.file` is the session file, `bee.append(...)` is
-the one act above, `bee.tokens` and `bee.limit` are the context used and the compaction threshold, and `bee.mcp` is the
-list of MCP servers the editor offers.
-
-**Compaction** is a prompt and a fork: the harness asks for a summary as an ordinary turn, then appends it under the
-first line. It happens when the context passes the limit, when you send `/compact`, or when the model does it itself.
+**Compaction** is a prompt and a branch: the harness asks for a summary as an ordinary turn, then appends it after
+line 0. It happens when the context passes the limit, or when you send `/compact`.
 
 **Permissions** are the editor's. Before each call the harness asks the editor to allow or reject it, and holds no
 policy of its own.
@@ -58,11 +52,4 @@ policy of its own.
 **Instructions** come from `AGENTS.md` in `~/.bee` and in every directory from the root down to the working directory.
 They are read once, when the session is created.
 
-Left out: sub-agents, memory, plan mode, an MCP client, config files, a terminal UI.
-
-## Notes
-
-- On Linux with systemd, each Python session runs in its own user scope, `bee-<session id>.scope`, so that an editor
-  which kills everything its agent started leaves it alone. `systemctl --user list-units 'bee-*'` lists them.
-- Variables are saved after every call, so a session holding a lot of data pays for that on each call.
-- To delete a session, delete its files.
+Left out: sub-agents, memory, plan mode, MCP, config files, a terminal UI.
