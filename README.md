@@ -28,7 +28,8 @@ knows, such as `ANTHROPIC_API_KEY`, works too.
 | `BEE_THINKING` | Default thinking level. Without it, `medium` |
 | `BEE_HOME` | Where bee keeps its files. Without it, `~/.bee/agent` |
 
-Model and thinking level can be changed per session from the editor, and by the model.
+Model and thinking level can be changed per session from the editor, and by the model. A new session starts with the
+settings of the one used last.
 
 ### In a terminal
 
@@ -40,8 +41,9 @@ bee -c         # continue the latest session here
 bee "…"        # start with a prompt
 ```
 
-Enter sends, Alt-Enter is a new line, Up and Down recall, Esc stops a turn, Ctrl-C clears or quits. `/model` and
-`/thinking` list their values; `/model <id>` sets one.
+Enter sends, Alt-Enter is a new line, Up and Down recall, Esc stops a turn, Ctrl-C clears or quits. Ctrl-A, Ctrl-E,
+Ctrl-W and Ctrl-U edit as in a shell. `/model` and `/thinking` list their values; `/model <id>` sets one, and
+`/model opus` the one whose id has `opus` in it.
 
 ## How it works
 
@@ -52,7 +54,7 @@ no other state: it reads the file before every step.
 
 **One act does everything.** Appending a line after an earlier one continues the conversation from there. Compaction is
 a summary appended after line 0. A rewind is a line appended after any other. A setting is a line too, `{model}` or
-`{thinking}`, and the latest one in the file holds.
+`{thinking}`, and the latest one in the file holds. Line 0 carries those of the session used last.
 
 **One tool.** `python` runs code in a Python process that lasts as long as the harness does. Its result is whatever the
 code and its child processes wrote, cut to 20,000 characters.

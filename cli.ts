@@ -139,13 +139,17 @@ async function prompt(text: string) {
   if (stopReason !== "end_turn") note(stopReason);
 }
 
-// `/model` lists the models and `/model <id>` picks one. So does every other setting bee has.
+// `/model` lists the models and `/model <id>` picks one, or `/model opus` the one with that in its id.
+// So does every other setting bee has.
 async function set(text: string) {
-  const [id, value] = text.slice(1).split(/\s+/);
+  const [id, wanted = ""] = text.slice(1).split(/\s+/);
   const option = options.find((option) => option.id === id);
   if (!option) return note(options.map((option) => "/" + option.id).join("  "));
-  if (!option.options.some((o) => o.value === value)) return note(option.options.map((o) => o.value).join("\n"));
-  options = (await call("session/set_config_option", { sessionId, configId: id, value })).configOptions;
+  const values = option.options.map((o) => o.value);
+  const exact = values.filter((value) => value === wanted || value.split("/").at(-1) === wanted);
+  const found = exact.length ? exact : values.filter((value) => wanted && value.includes(wanted));
+  if (found.length !== 1) return note((found.length ? found : values).join("\n"));
+  options = (await call("session/set_config_option", { sessionId, configId: id, value: found[0] })).configOptions;
   draw();
 }
 
@@ -179,6 +183,14 @@ const keys: Record<string, () => unknown> = {
   },
   "\x1b\r": () => insert("\n"),
   "\x7f": () => cursor && edit(typed.slice(0, cursor - 1) + typed.slice(cursor), cursor - 1),
+  "\x1b[3~": () => edit(typed.slice(0, cursor) + typed.slice(cursor + 1), cursor),
+  "\x17": () => {
+    const kept = typed.slice(0, cursor).replace(/\S*\s*$/, ""); // the word before the cursor goes
+    edit(kept + typed.slice(cursor), kept.length);
+  },
+  "\x15": () => edit(typed.slice(cursor), 0),
+  "\x01": () => edit(typed, 0),
+  "\x05": () => edit(typed, Infinity),
   "\x1b[D": () => edit(typed, cursor - 1),
   "\x1b[C": () => edit(typed, cursor + 1),
   "\x1b[A": () => recall(1),
@@ -186,6 +198,9 @@ const keys: Record<string, () => unknown> = {
   "\x1b": () => busy && send({ method: "session/cancel", params: { sessionId } }),
   "\x03": () => (typed ? edit("", 0) : quit()),
 };
+
+for (const [alias, key] of [["\x1b[H", "\x01"], ["\x1b[1~", "\x01"], ["\x1b[F", "\x05"], ["\x1b[4~", "\x05"]])
+  keys[alias] = keys[key];
 
 let pasting = false;
 process.stdin.setRawMode(true).setEncoding("utf8").on("data", (data: string) => {
@@ -199,4 +214,5 @@ process.stdin.setRawMode(true).setEncoding("utf8").on("data", (data: string) => 
 });
 out.write("\x1b[?2004h");
 out.on("resize", () => draw());
-draw();
+const first = process.argv.slice(2).filter((arg) => arg !== "-c").join(" ").trim();
+first ? submit(first) : draw();

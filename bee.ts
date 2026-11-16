@@ -62,10 +62,22 @@ function append(sid: string, { parent, ...rest }: Partial<Line>) {
   appendFileSync(file(sid), (ended ? "" : "\n") + line + "\n");
 }
 
+/** Session ids, the one used last first. */
+const sessions = () =>
+  readdirSync(SESSIONS)
+    .filter((name) => name.endsWith(".jsonl"))
+    .map((name) => ({ sid: name.slice(0, -6), at: statSync(join(SESSIONS, name)).mtimeMs }))
+    .sort((a, b) => b.at - a.at)
+    .map(({ sid }) => sid);
+
+/** A new session starts with the settings of the one used last. */
 function create(cwd: string): string {
   const sid = randomUUID();
+  const last = sessions()[0];
+  const lines = last ? read(last) : [];
+  const [model, thinking] = [latest(lines, (line) => line.model), latest(lines, (line) => line.thinking)];
   const message = { role: "system", content: prompt(cwd, file(sid)), toolsAdded: [PYTHON], timestamp: Date.now() };
-  appendFileSync(file(sid), JSON.stringify({ parent: null, cwd, message }) + "\n");
+  appendFileSync(file(sid), JSON.stringify({ parent: null, cwd, model, thinking, message }) + "\n");
   return sid;
 }
 
@@ -308,17 +320,14 @@ const handlers: Record<string, (params: any) => unknown> = {
   "session/resume": ({ sessionId }) => open(sessionId),
   "session/load": ({ sessionId }) => (replay(sessionId), open(sessionId)),
   "session/list": ({ cwd }) => ({
-    sessions: readdirSync(SESSIONS)
-      .filter((name) => name.endsWith(".jsonl"))
-      .map((name) => {
-        const sessionId = name.slice(0, -6);
+    sessions: sessions()
+      .map((sessionId) => {
         const lines = read(sessionId);
         const title = text(lines.find((line) => line.message?.role === "user")?.message?.content ?? "").slice(0, 80);
         const updatedAt = statSync(file(sessionId)).mtime.toISOString();
         return { sessionId, cwd: lines[0].cwd, title: title || undefined, updatedAt };
       })
-      .filter((session) => !cwd || session.cwd === cwd)
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+      .filter((session) => !cwd || session.cwd === cwd),
   }),
   "session/set_config_option": ({ sessionId, configId, value }) => {
     if (!options(sessionId).some((option) => option.id === configId)) throw new Error(`No option ${configId}`);
