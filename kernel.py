@@ -1,19 +1,8 @@
 #!/usr/bin/env python3
-"""bee's one tool: a Python session. Takes {code, settings} lines on stdin, answers {output, failed, lines} on stdout.
-
-    kernel.py FILE    FILE is the session's JSONL file
-"""
+"""bee's one tool: a Python session. Takes {code} lines on stdin, answers {output, failed} lines on stdout."""
 import ast, json, linecache, os, signal, sys, tempfile, traceback, types
 
-asked = []  # lines the running call wants appended to the session
-
-
-def branch(parent, text):
-    """Append text as a user message after line parent, and this call after that."""
-    if parent not in range(sum(1 for _ in open(bee.file))):
-        raise ValueError(f"no line {parent!r}")
-    asked.append({"parent": parent, "text": text})
-    print(f"Continuing after line {parent}.")
+SHOWN = 20_000  # characters of output the model sees per call
 
 
 def run(code, name):
@@ -54,24 +43,12 @@ sys.modules["__main__"] = main
 sys.path[0] = ""  # imports look in the working directory, not next to this script
 scope = main.__dict__
 
-# The harness, as a module: the session file, the one act, and the settings.
-bee = scope["bee"] = sys.modules["bee"] = types.ModuleType("bee")
-bee.file, bee.branch = sys.argv[1], branch
-ran = any('"role":"toolResult"' in line for line in open(bee.file))  # this session has had a Python before
-note = "[New Python session: earlier variables are gone.]\n" if ran else ""
-
 for n, request in enumerate(map(json.loads, requests)):
-    settings = request["settings"]
-    vars(bee).update(settings)
-    asked.clear()
     failed = call(request["code"], f"<call {n}>")
     sys.stdout.flush(), sys.stderr.flush()
     written.seek(0)
-    output, note = note + written.read().decode(errors="replace"), ""
+    output = written.read().decode(errors="replace")
     written.seek(0), written.truncate()
-    if (cut := len(output) - settings["output"]) > 0:
-        half = settings["output"] // 2
-        output = f"{output[:half]}\n[{cut} characters cut]\n{output[-half:]}"
-    changed = {key: getattr(bee, key, None) for key in settings if getattr(bee, key, None) != settings[key]}
-    lines = [changed, *asked] if changed else asked
-    print(json.dumps({"output": output, "failed": failed, "lines": lines}, default=str), file=replies, flush=True)
+    if (cut := len(output) - SHOWN) > 0:
+        output = f"{output[: SHOWN // 2]}\n[{cut} characters cut]\n{output[-SHOWN // 2 :]}"
+    print(json.dumps({"output": output, "failed": failed}), file=replies, flush=True)
