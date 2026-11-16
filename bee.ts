@@ -48,9 +48,9 @@ function append(sid: string, { parent, ...rest }: Partial<Line>) {
 }
 
 function create(cwd: string): string {
-  const sid = randomUUID();
-  const message = { role: "system", content: prompt(cwd), toolsAdded: [PYTHON], timestamp: Date.now() };
-  appendFileSync(stem(sid) + ".jsonl", JSON.stringify({ id: id(), parent: null, cwd, message }) + "\n");
+  const [sid, root] = [randomUUID(), id()];
+  const message = { role: "system", content: prompt(cwd, root), toolsAdded: [PYTHON], timestamp: Date.now() };
+  appendFileSync(stem(sid) + ".jsonl", JSON.stringify({ id: root, parent: null, cwd, message }) + "\n");
   return sid;
 }
 
@@ -68,8 +68,15 @@ const setting = (lines: Line[], key: string) => lines.findLast((line) => key in 
 
 const PYTHON = {
   name: "python",
-  description: "Run code in your Python session.",
-  parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
+  description:
+    "Run Python in a session that stays open: variables, imports, functions and processes persist between calls. " +
+    "Returns what the code and its child processes write to stdout and stderr. The value of a final expression is " +
+    "printed, as in a REPL. Output over 20,000 characters is cut in the middle; bee.out holds all of it.",
+  parameters: {
+    type: "object",
+    properties: { code: { type: "string", description: "Python source. The user sees its first line as the title." } },
+    required: ["code"],
+  },
 };
 
 const COMPACT =
@@ -77,23 +84,31 @@ const COMPACT =
   "from: what the user asked for, what is done, what remains, and which files and which variables in your Python " +
   "session matter. Do not call the tool.";
 
-const prompt = (cwd: string) => `You are bee, a coding agent working in ${cwd}.
+const prompt = (cwd: string, root: string) => `You are an agent in the bee harness.
+cwd: ${cwd}
 
-You have one tool, \`python\`: a Python session that stays open between calls. Variables, imports, functions and \
-processes you start all persist, so keep data in variables and print only what you need to read. The value of a final \
-expression is printed, as in a REPL. Do everything through it: read and edit files, run commands, search, fetch. Begin \
-each call with a comment saying what it does; the user sees that line as its title. Output beyond 20,000 characters \
-is cut from the middle; all of it stays in \`bee.out\`.
+\`bee\` is the harness, as an object in your Python session.
 
-\`bee\` is this harness, inside the session:
-- \`bee.file\` is the conversation: a JSONL file, one line per message, each \`{id, parent, message?}\`. What you see \
-is the path from the last line back to the first. Nothing is ever removed from the file.
-- \`bee.append(text=None, parent=None, **settings)\` adds a line when the call returns, and the conversation continues \
-from it. \`parent\` is the id of any line, by default the last; \`text\` becomes a user message. Appending a summary \
-under the first line starts over from that summary: that is how context is compacted, and the harness does it for you \
-once \`bee.tokens\` passes \`bee.limit\`. The settings are \`model="provider/id"\` and \
-\`thinking="off|low|medium|high"\`, and they hold from then on.
-- \`bee.mcp\` lists the MCP servers the editor offers.
+bee.file
+    This session: a JSONL file, one line per message, each {id, parent, message}.
+    The first line is this prompt, id "${root}". Your context is the path from the last line back to the first.
+    Lines are only ever added.
+
+bee.append(text=None, parent=None, **settings)
+    Adds a line when the current call returns. The session continues from it.
+    text      a user message
+    parent    id of the line to add under; by default the last line
+    settings  model="provider/id", thinking="off|minimal|low|medium|high"; they hold until changed
+    bee.append(summary, parent="${root}") compacts: your context becomes this prompt and the summary.
+
+bee.tokens, bee.limit
+    Tokens in your context, and the number at which bee compacts it for you.
+
+bee.mcp
+    MCP servers the editor offers.
+
+bee.out
+    All the output of the last call.
 
 ${instructions(cwd)}`.trim();
 
