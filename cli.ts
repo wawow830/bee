@@ -74,8 +74,9 @@ function draw(finished: string[] = []) {
   const input = chop(typed);
   const before = chop(typed.slice(0, cursor)); // the cursor is at the end of these rows
   const fits = hints(tabbed || typed);
-  const chosen = Math.max(0, fits.indexOf(typed)); // the one Tab is on, or else the first
+  const chosen = fits.indexOf(typed); // the one Tab is on
   const shown = fits.slice(Math.max(0, chosen - 7), Math.max(8, chosen + 1));
+  const from = (tabbed || typed).match(/^\/\S*\s+/)?.[0].length ?? 0; // each hint is shown from where it differs
   const below = input.length - before.length + shown.length;
   const mark = busy ? "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[Math.floor(Date.now() / 80) % 10] : "›";
   const thinking = thought.trim().split("\n").at(-1)!.slice(0, out.columns - 3);
@@ -88,7 +89,7 @@ function draw(finished: string[] = []) {
     "",
     `${amber(mark)} ${input[0].padEnd(size)}  ${dark(status)}`,
     ...input.slice(1).map((row) => "  " + row),
-    ...shown.map((hint) => "  " + (hint === fits[chosen] ? gray : dark)(hint.slice(0, out.columns - 3))),
+    ...shown.map((hint) => " ".repeat(2 + from) + (hint === typed ? light : dark)(hint.slice(from, out.columns - 3))),
   ];
   // One frame: erase what was drawn, draw, and put the cursor where it is in the prompt.
   out.write(`\x1b[?2026h${clear()}${rows.join("\n")}${up(below)}\x1b[${3 + before.at(-1)!.length}G\x1b[?2026l`);
