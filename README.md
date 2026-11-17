@@ -52,7 +52,8 @@ session, Esc stops a turn, Ctrl-C clears, stops or quits. Ctrl-A, Ctrl-E, Ctrl-W
 
 Once a turn is over, it shows what you said and bee's answer. Click either to unfold the work before the answer: what
 bee thought and ran, and what it said on the way. While bee works, the work is shown. In it, each thing is one row, and
-clicking it shows all of it: the whole thought, or the whole command and what it printed. The wheel scrolls, and Shift-drag selects.
+clicking it shows all of it: the whole thought, or the whole command and what it printed. The wheel scrolls, and
+Shift-drag selects.
 
 `/model`, `/thinking` and `/session` each take a value: `/model opus` is the model with `opus` in its id, and
 `/session` is `new` or the title of another session here. What fits is shown under the prompt as you type. Tab goes
