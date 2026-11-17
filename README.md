@@ -65,7 +65,7 @@ harness reads the file before every step and keeps no other state. For each sett
 `{cache}`, the latest line holds.
 
 **One tool.** `bash` runs a command in a new bash, which starts in the working directory. Its result is whatever the
-command wrote, cut to 20,000 characters. If what it wrote is an image, the model sees the image. The computer is what
+command wrote, cut to 12,000 characters. If what it wrote is an image, the model sees the image. The computer is what
 lasts: files, and whatever the command left running.
 
 **The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model what

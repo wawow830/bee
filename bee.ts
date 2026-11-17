@@ -68,7 +68,7 @@ type Line = Settings & { message?: Message; cwd?: string };
 const SESSIONS = join(HOME, "sessions");
 const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
 
-const SHOWN = 20_000; // characters of output the model sees per call
+const SHOWN = 12_000; // characters of output the model sees per call
 
 const BASH = {
   name: "bash",
