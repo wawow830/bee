@@ -232,7 +232,7 @@ async function prompt(text: string) {
 
 // ── Commands ────────────────────────────────────────────────────────────────
 // `/model`, `/thinking` and `/session` each take one of their values: the one named, or else those with what you
-// typed in them. What fits is shown under the prompt. Tab goes through it, and Enter takes the first once only one
+// typed in them. What fits is shown under the prompt. Tab goes through it, and Enter sends the command once only one
 // fits.
 
 let others: Session[] = []; // the other sessions here, latest first
@@ -325,7 +325,7 @@ function tab() {
 function enter(wait = false) {
   const text = typed.trim();
   const [hint, ...more] = hints(typed);
-  if (text.startsWith("/") && (!hint || more.length || hint.endsWith(" "))) return tab(); // not one value yet
+  if (text.startsWith("/") && (!hint || more.length || hint.endsWith(" "))) return; // not one value yet
   if (!text) return;
   history.push(text);
   back = 0;
@@ -336,8 +336,9 @@ function enter(wait = false) {
 
 const keys: Record<string, () => unknown> = {
   "\r": enter,
-  "\t": () => (typed.trimStart().startsWith("/") ? tab() : enter(true)), // Tab completes a command, or queues
-  "\x1b\r": () => splice(cursor, cursor, "\n"), // Alt-Enter
+  "\t": tab,
+  "\x1b\r": () => enter(true), // Alt-Enter: for when the turn is over
+  "\n": () => splice(cursor, cursor, "\n"), // Ctrl-J
   "\x7f": () => splice(Math.max(0, cursor - 1), cursor), // Backspace
   "\x1b[3~": () => splice(cursor, cursor + 1), // Delete
   "\x17": () => splice(typed.slice(0, cursor).search(/\S*\s*$/), cursor), // Ctrl-W: the word before the cursor
