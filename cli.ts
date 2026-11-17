@@ -89,7 +89,10 @@ function draw(finished: string[] = []) {
     "",
     `${amber(mark)} ${input[0].padEnd(size)}  ${dark(status)}`,
     ...input.slice(1).map((row) => "  " + row),
-    ...shown.map((hint) => " ".repeat(2 + from) + (hint === typed ? light : dark)(hint.slice(from, out.columns - 3))),
+    ...shown.map((hint) => {
+      const text = hint.slice(from, out.columns - 3);
+      return " ".repeat(2 + from) + (hint === typed ? text : dark(text)); // the one Tab is on is in the prompt
+    }),
   ];
   // One frame: erase what was drawn, draw, and put the cursor where it is in the prompt.
   out.write(`\x1b[?2026h${clear()}${rows.join("\n")}${up(below)}\x1b[${3 + before.at(-1)!.length}G\x1b[?2026l`);
