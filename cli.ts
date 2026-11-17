@@ -431,10 +431,11 @@ function draw() {
   const chop = (text: string) => cut(text, `.{1,${size}}`);
   const input = chop(typed);
   const before = chop(typed.slice(0, cursor)); // the cursor is at the end of these rows
-  const fits = hints(tabbed || typed);
+  const command = read(tabbed || typed);
+  const fits = command?.fits ?? [];
   const last = Math.max(choices, fits.indexOf(typed) + 1); // the hints shown end at the one Tab is on
   const listed = fits.slice(last - choices, last);
-  const from = (tabbed || typed).match(/^\/\S*\s+/)?.[0].length ?? 0; // each hint is shown from where it differs
+  const from = command?.of ? command.of.length + 2 : 0; // values are shown from where they differ
   const more = fits.length - listed.length;
   const widest = Math.max(...listed.map((hint) => hint.trimEnd().length));
   const below = input.length - before.length + listed.length + (more ? 1 : 0);
@@ -446,8 +447,9 @@ function draw() {
     amber(busy() ? turning + " " : mark) + input[0],
     ...input.slice(1).map((row) => pad + row),
     ...listed.map((hint) => {
-      const named = hint.match(/^\/(\S+) $/)?.[1]; // a command, which is shown with what it is set to
-      const text = (named ? hint.trimEnd().padEnd(widest) + pad + current(named) : hint).slice(from, room()).trimEnd();
+      // A value is shown as it is, and a command with what it is set to.
+      const set = command!.of ? hint : hint.trimEnd().padEnd(widest) + pad + current(hint.slice(1, -1));
+      const text = set.slice(from, room()).trimEnd();
       return pad + " ".repeat(from) + (hint === typed ? text : dark(text)); // the one Tab is on is in the prompt
     }),
     ...(more ? [pad + " ".repeat(from) + dark(`${more} more`)] : []),
@@ -614,61 +616,87 @@ async function prompt(text: string) {
   if (stopReason !== "end_turn" && !prompts) note(stopReason);
 }
 
-/** Wait for the turn to end, and for what was queued before. */
-function queue(text: string) {
+/** Wait for the turn to end, and for what was queued before; then say `text`, or, for a command, `pick` its value. */
+function queue(text: string, pick?: () => Promise<unknown>) {
   queued.push(text);
-  const next = () => {
+  const next = async () => {
     queued.shift();
-    return text.startsWith("/") ? command(text) : prompt(text);
+    if (!pick) return prompt(text);
+    user(text);
+    await pick();
+    draw();
   };
   last = last.then(next).catch((error) => note(error.message, red));
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
-// `/model`, `/thinking` and `/session` each take one of their values: the one named, or else those with what you
-// typed in them. What fits is shown under the prompt. Tab goes through it, and Enter sends the command once only one
-// fits.
+// `/model`, `/thinking` and `/session` each take one of their values. The prompt is a command while it is `/` and the
+// start of a command's id, or a command's id and words; anything else, such as a path, is a prompt. The values that fit
+// the words are those of the best kind of fit there is: the value, the value after its provider, or a part of it. What
+// fits is shown under the prompt. Tab goes through it, and Enter sends the command once only one fits.
 
-const title = (session: Session) => session.title!.split("\n")[0].trim();
+/** A command: each of its values, and what picking it does. */
+type Command = { id: string; values: Map<string, () => Promise<unknown>> };
 
-/** Each command, with its values and what picking one does. */
-function commands() {
+/** Values by name. A name already given, or none, names nothing more. */
+function named(values: [string, () => Promise<unknown>][]) {
+  const map = new Map<string, () => Promise<unknown>>();
+  for (const [name, pick] of values) if (name && !map.has(name)) map.set(name, pick);
+  return map;
+}
+
+const title = (session: Session) => session.title!.trim().split("\n")[0];
+
+/** Each command. A session is named by its title, so of those alike the latest; and `new` is always a new one. */
+function commands(): Command[] {
   const settings = options.map((option) => ({
     id: option.id,
-    values: option.options.map((choice) => choice.value),
-    pick: async (value: string) => {
-      options = (await call("session/set_config_option", { sessionId, configId: option.id, value })).configOptions;
-    },
+    values: named(
+      option.options.map(({ value }) => [
+        value,
+        async () => {
+          options = (await call("session/set_config_option", { sessionId, configId: option.id, value })).configOptions;
+        },
+      ]),
+    ),
   }));
   const session = {
     id: "session",
-    values: ["new", ...others.map(title)],
-    pick: (value: string) => open(others.find((other) => title(other) === value)?.sessionId),
+    values: named([
+      ["new", () => open()],
+      ...others.map((other): [string, () => Promise<void>] => [title(other), () => open(other.sessionId)]),
+    ]),
   };
   return [...settings, session];
 }
 
-/** What the prompt could become: the commands it starts, or the values of its command that fit the words after. */
-function hints(text: string): string[] {
-  const [, id, words] = text.match(/^\/(\S*)(?:\s+(.*))?$/s) ?? [];
-  if (id === undefined) return [];
-  const all = commands();
-  if (words === undefined) return all.map((command) => `/${command.id} `).filter((hint) => hint.startsWith("/" + id));
-  const values = all.find((command) => command.id === id)?.values ?? [];
-  const wanted = words.trim();
-  const named = values.filter((value) => value === wanted || value.endsWith("/" + wanted));
-  const found = named.length ? named : values.filter((value) => value.toLowerCase().includes(wanted.toLowerCase()));
-  return found.map((value) => `/${id} ${value}`);
-}
+/** The kinds of fit a value can be for the words typed, best first. */
+const fitting = [
+  (value: string, words: string) => value === words,
+  (value: string, words: string) => value.endsWith("/" + words),
+  (value: string, words: string) => value.includes(words),
+];
 
-/** Run `/<id> <value>`, as a hint wrote it. */
-async function command(text: string) {
-  user(text);
-  const [, id, value] = text.match(/^\/(\S+) (.*)$/s)!;
-  await commands()
-    .find((command) => command.id === id)!
-    .pick(value);
-  draw();
+/**
+ * The prompt as a command, or nothing if it is not one: what it could become, the command whose values those are, if
+ * they are values, and what picking it does once only one fits.
+ */
+function read(text: string): { fits: string[]; of?: string; pick?: () => Promise<unknown> } | undefined {
+  const [, id, words] = text.match(/^\/(\S*)(?:\s+(.*))?$/s) ?? [];
+  if (id === undefined) return;
+  if (words === undefined) {
+    const fits = commands().flatMap((command) => (command.id.startsWith(id) ? [`/${command.id} `] : []));
+    return fits.length ? { fits } : undefined;
+  }
+  const command = commands().find((command) => command.id === id);
+  if (!command) return;
+  const wanted = words.trim().toLowerCase();
+  const values = [...command.values.keys()];
+  const found = fitting
+    .map((fits) => values.filter((value) => fits(value.toLowerCase(), wanted)))
+    .find((some) => some.length);
+  const fits = (found ?? []).map((value) => `/${id} ${value}`);
+  return { fits, of: id, pick: found?.length === 1 ? command.values.get(found[0]) : undefined };
 }
 
 // ── Keyboard ────────────────────────────────────────────────────────────────
@@ -693,7 +721,7 @@ function recall(step: number) {
 
 /** Take the first of what fits, or at the next Tab the one after. */
 function tab() {
-  const fits = hints(tabbed || typed);
+  const fits = read(tabbed || typed)?.fits ?? [];
   if (fits.length > 1) tabbed ||= typed; // with only one, the next Tab goes on from it
   if (fits.length) splice(0, typed.length, fits[(fits.indexOf(typed) + 1) % fits.length]);
 }
@@ -701,14 +729,14 @@ function tab() {
 /** Send what is typed: into the turn under way, unless you `wait`, or it is a command. */
 function enter(wait = false) {
   const text = typed.trim();
-  const [hint, ...more] = hints(typed);
-  if (text.startsWith("/") && (!hint || more.length || hint.endsWith(" "))) return; // not one value yet
-  if (!text) return;
+  const command = read(typed);
+  if (!text || (command && !command.pick)) return; // a command, but not one value yet
   history.push(text);
   back = 0;
   top = undefined; // the transcript follows again
   splice(0, typed.length);
-  if (wait || hint || !busy()) return queue(hint ?? text);
+  if (command) return queue(command.fits[0], command.pick);
+  if (wait || !busy()) return queue(text);
   prompt(text).catch((error) => note(error.message, red));
 }
 
@@ -769,5 +797,6 @@ process.stdin.setRawMode(true).setEncoding("utf8").on("data", press);
 out.on("resize", draw);
 setInterval(() => busy() && draw(), frame); // the mark turns while bee works
 
-if (first) queue(first);
-else draw();
+splice(0, 0, first);
+enter(); // one you start with is sent as one you type, unless it is a command not yet whole
+draw();

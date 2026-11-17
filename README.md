@@ -56,8 +56,9 @@ said, and clicking what you said or the answer unfolds it. The wheel scrolls, an
 transcript is left in the terminal as it was last shown.
 
 `/model`, `/thinking` and `/session` each take a value: `/model opus` is the model with `opus` in its id, and
-`/session` is `new` or the title of another session here. What fits is shown under the prompt as you type. Tab goes
-through it, and Enter sends the command once only one fits.
+`/session` is `new` or the title of another session here. A value named whole, or without its provider, is the one
+meant, whatever its case. What fits is shown under the prompt as you type. Tab goes through it, and Enter sends the
+command once only one fits. Anything else that starts with `/`, such as a path, is a prompt.
 
 ## How it works
 
