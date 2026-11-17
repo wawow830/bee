@@ -60,20 +60,20 @@ through it, and Enter sends the command once only one fits.
 
 ## How it works
 
-**A session is a file.** `~/.bee/agent/sessions/<id>.jsonl` holds one line per message, setting chosen, or directory a
-command left bash in, written as things happen and only ever appended. Its first line is how it began: its working
-directory, the prompt with the `AGENTS.md` files, the tool, and the settings in `settings.json`.
+**A session is a file.** `~/.bee/agent/sessions/<id>.jsonl` holds one line per message or setting chosen, written as
+things happen and only ever appended. Its first line is how it began: its working directory, the prompt with the
+`AGENTS.md` files, the tool, and the settings in `settings.json`.
 
 **Every request is the file's messages.** So each begins as the last one did, and the provider's cache of it holds. The
-harness reads the file before every step and keeps no other state. For each setting, `{model}`, `{thinking}`,
-`{cache}` or `{cwd}`, the latest line holds.
+harness reads the file before every step and keeps no other state. For each setting, `{model}`, `{thinking}` or
+`{cache}`, the latest line holds.
 
-**One tool.** `bash`: "Runs a command in bash. The working directory persists between calls; nothing else does. Returns
-stdout and stderr, cut at 12,000 characters, or the image written." A command runs where the last one left bash, or in
-the session's directory if that is gone. The computer is what lasts: files, and whatever a command left running.
+**One tool.** `bash`: "Returns the output, cut at 12,000 characters, or the image written." Every command starts in the
+working directory, and one that ends elsewhere is told "Shell cwd was reset to <it>", as Claude Code tells it. The
+computer is what lasts: files, and whatever a command left running.
 
-The directory persists because Claude is trained on a shell where it does. In a fresh bash each call, whether the
-prompt names the directory or a `pwd` finds it, the model puts `cd <it> &&` before every command.
+The tool says nothing else of directories. Told each call is a fresh bash, a model that knows where it is puts
+`cd <it> &&` before every command.
 
 **The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model what
 to do. Instructions are yours, in `AGENTS.md`, from `~/.bee/agent` and every directory from the root down to the working

@@ -56,11 +56,11 @@ const available = await models.getAvailable();
 const ref = (model: Model<Api>) => `${model.provider}/${model.id}`;
 
 // ── Sessions ────────────────────────────────────────────────────────────────
-// A session is a file of lines, written as things happen: messages, the
-// settings chosen, and where commands leave bash. Lines are only appended, so
-// every request begins with the last one, and the provider's cache of it
-// holds. The first line is how the session began: its directory, the prompt
-// and the tool, and the settings in settings.json.
+// A session is a file of lines, written as things happen: messages, and the
+// settings chosen. Lines are only appended, so every request begins with the
+// last one, and the provider's cache of it holds. The first line is how the
+// session began: its directory, the prompt and the tool, and the settings in
+// settings.json.
 
 type Settings = { model?: string; thinking?: string; cache?: string };
 type Line = Settings & { message?: Message; cwd?: string };
@@ -72,9 +72,7 @@ const SHOWN = 12_000; // characters of output the model sees per call
 
 const BASH = {
   name: "bash",
-  description:
-    "Runs a command in bash. The working directory persists between calls; nothing else does. " +
-    `Returns stdout and stderr, cut at ${SHOWN.toLocaleString("en")} characters, or the image written.`,
+  description: `Returns the output, cut at ${SHOWN.toLocaleString("en")} characters, or the image written.`,
   parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
 };
 
@@ -133,16 +131,6 @@ function append(sid: string, line: Line, flag: string | number = constants.O_WRO
 }
 
 const cwdOf = (sid: string) => lines(sid)[0].cwd!;
-
-/**
- * Where a command runs: where the last one left bash, or the session's directory if that is gone. A model knows where
- * it is, as in the shell it was trained on, and has no need to cd to where it already is before every command.
- */
-function where(sid: string) {
-  const all = lines(sid);
-  const last = all.findLast((line) => line.cwd)!.cwd!;
-  return existsSync(last) ? last : all[0].cwd!;
-}
 
 const conversation = (sid: string) => lines(sid).flatMap((line) => (line.message ? [line.message] : []));
 
@@ -228,11 +216,11 @@ async function bash(sid: string, command: string, signal: AbortSignal) {
   // Written to a file, not a pipe, so the call ends when the command does, whatever it left running.
   const path = join(tmpdir(), `bee-${randomUUID()}`);
   const out = openSync(path, "w");
-  const here = where(sid);
+  const cwd = cwdOf(sid);
   const left = path + ".cwd"; // where bash is when it exits
   // In its own process group, so an interrupt stops all of it.
   const child = spawn("bash", ["-c", `trap 'pwd > "${left}"' EXIT\n${command}`], {
-    cwd: here,
+    cwd,
     stdio: ["ignore", out, out],
     detached: true,
   });
@@ -240,12 +228,13 @@ async function bash(sid: string, command: string, signal: AbortSignal) {
   signal.addEventListener("abort", interrupt);
   try {
     const [status] = await once(child, "exit");
-    const there = read(left).trim();
-    if (there && there !== here) append(sid, { cwd: there });
     const written = readFileSync(path);
     const start = written.subarray(0, 12).toString("latin1");
     const mimeType = Object.keys(IMAGES).find((type) => IMAGES[type].test(start));
-    const text = written.toString("utf8") || "(no output)";
+    // Every command starts in the session's directory. One that ends elsewhere is told so, as Claude Code tells it.
+    const ended = read(left).trim();
+    const reset = ended && ended !== cwd ? `Shell cwd was reset to ${cwd}` : "";
+    const text = [written.toString("utf8").trimEnd(), reset].filter(Boolean).join("\n") || "(no output)";
     const cut = text.length - SHOWN;
     const content: ToolResultMessage["content"] = mimeType
       ? [{ type: "image", data: written.toString("base64"), mimeType }]
