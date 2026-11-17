@@ -4,6 +4,12 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
+const args = process.argv.slice(2);
+if (args.some((arg) => arg.startsWith("-") && arg !== "-c")) {
+  console.log('bee            new session\nbee -c         continue the latest session here\nbee "…"        start with a prompt');
+  process.exit();
+}
+
 const out = process.stdout;
 const color = (code: number) => (text: string) => `\x1b[38;5;${code}m${text}\x1b[39m`;
 const [amber, light, gray, dark, red] = [color(214), color(250), color(245), color(239), color(203)];
@@ -125,7 +131,7 @@ function quit(status = 0, message = "") {
 const cwd = process.cwd();
 const must = (method: string, params: object) => call(method, params).catch((error) => quit(1, error.message + "\n"));
 await must("initialize", { protocolVersion: 1, clientCapabilities: {} });
-const latest = process.argv.includes("-c") && (await must("session/list", { cwd })).sessions.find((s: any) => s.title);
+const latest = args.includes("-c") && (await must("session/list", { cwd })).sessions.find((s: any) => s.title);
 const session = await must(latest ? "session/load" : "session/new", { sessionId: latest?.sessionId, cwd, mcpServers: [] });
 const sessionId: string = session.sessionId;
 options = session.configOptions;
@@ -214,5 +220,5 @@ process.stdin.setRawMode(true).setEncoding("utf8").on("data", (data: string) => 
 });
 out.write("\x1b[?2004h");
 out.on("resize", () => draw());
-const first = process.argv.slice(2).filter((arg) => arg !== "-c").join(" ").trim();
+const first = args.filter((arg) => arg !== "-c").join(" ").trim();
 first ? submit(first) : draw();
