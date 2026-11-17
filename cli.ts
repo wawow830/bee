@@ -133,7 +133,7 @@ const must = (method: string, params: object) => call(method, params).catch((err
 await must("initialize", { protocolVersion: 1, clientCapabilities: {} });
 const latest = args.includes("-c") && (await must("session/list", { cwd })).sessions.find((s: any) => s.title);
 const session = await must(latest ? "session/load" : "session/new", { sessionId: latest?.sessionId, cwd, mcpServers: [] });
-const sessionId: string = session.sessionId;
+let sessionId: string = session.sessionId;
 options = session.configOptions;
 
 async function prompt(text: string) {
@@ -149,13 +149,28 @@ async function prompt(text: string) {
 // So does every other setting bee has.
 async function set(text: string) {
   const [id, wanted = ""] = text.slice(1).split(/\s+/);
+  if (id === "session") return reopen(text.slice(8).trim());
   const option = options.find((option) => option.id === id);
-  if (!option) return note(options.map((option) => "/" + option.id).join("  "));
+  if (!option) return note([...options.map((option) => "/" + option.id), "/session"].join("  "));
   const values = option.options.map((o) => o.value);
   const exact = values.filter((value) => value === wanted || value.split("/").at(-1) === wanted);
   const found = exact.length ? exact : values.filter((value) => wanted && value.includes(wanted));
   if (found.length !== 1) return note((found.length ? found : values).join("\n"));
   options = (await call("session/set_config_option", { sessionId, configId: id, value: found[0] })).configOptions;
+  draw();
+}
+
+// `/session` lists the other sessions here, and `/session <words>` opens the one with them in its title or id.
+async function reopen(wanted: string) {
+  const others = (await call("session/list", { cwd })).sessions.filter((s: any) => s.title && s.sessionId !== sessionId);
+  const has = (s: any) => wanted && `${s.sessionId} ${s.title}`.toLowerCase().includes(wanted.toLowerCase());
+  const found = others.filter(has);
+  if (found.length !== 1) {
+    const listed = (found.length ? found : others).slice(0, 10).map((s: any) => s.title.split("\n")[0]);
+    return note(listed.join("\n") || "No other sessions here.");
+  }
+  const opened = await call("session/load", { sessionId: found[0].sessionId, cwd, mcpServers: [] });
+  [sessionId, options, usage] = [found[0].sessionId, opened.configOptions, ""];
   draw();
 }
 
