@@ -27,7 +27,7 @@ const first = args
 // ── Look ────────────────────────────────────────────────────────────────────
 // Each colour means one thing. Amber is where you type. Words are in the terminal's own colour, code in gray, and
 // red is what failed. All else is dark: marks, hints, and what this terminal says for itself. What bee thinks is as
-// what it says, only faint and italic.
+// what it says, only faint and italic, and is shown only while bee thinks it.
 
 const out = process.stdout;
 
@@ -49,6 +49,7 @@ const mark = "› "; // what you say begins with it
 const spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"; // the mark, while bee works
 const frame = 80; // how many milliseconds each turn of the spinner shows
 const choices = 8; // how many hints are shown
+const glimpse = 3; // how many rows of what bee is thinking are shown
 
 /** How wide a row can be after `indent` columns. The last column stays free. */
 const room = (indent = pad.length) => out.columns - 1 - indent;
@@ -293,12 +294,12 @@ function render(reply: string, whole: boolean, look = 0): Rendered {
 
 // ── Screen ──────────────────────────────────────────────────────────────────
 // The transcript is everything said, each thing shown at the screen's width. Its final rows are printed once, and
-// below them the rest is redrawn: what may yet change, what bee is running, what you have queued, and the prompt.
-// When the screen's width changes, all of it is shown again at the new width.
+// below them the rest is redrawn: what may yet change, what bee is thinking or running, what you have queued, and the
+// prompt. When the screen's width changes, all of it is shown again at the new width.
 
 type Option = { id: string; currentValue: string; options: { value: string }[] };
 
-/** Who said a thing in the transcript, or what it is. */
+/** Who said a thing shown, or what it is. */
 type Said = "user" | "thought" | "reply" | "tool" | "note";
 
 /** A thing in the transcript, as rows at the screen's width. */
@@ -307,7 +308,8 @@ type Entry = { said: Said; render: () => Rendered };
 let typed = ""; // the prompt
 let cursor = 0; // where the cursor is in it
 let tabbed = ""; // what you typed, while Tab goes through what fits it
-let writing: { said: "thought" | "reply"; text: string; whole: boolean } | undefined; // what bee is thinking or saying
+let writing: { text: string; whole: boolean } | undefined; // what bee has written of the reply it is writing
+let thinking = ""; // what bee is thinking, until it says or runs something
 let usage = ""; // how full its context is
 let options: Option[] = []; // the session's settings
 let prompts = 0; // how many bee has not answered: a turn is under way while there are any
@@ -363,8 +365,12 @@ function current(id: string) {
 function draw() {
   const rendered = transcript.map(({ said, render }) => ({ said, ...render() }));
   const settled = layout(rendered.map(({ said, rows, final }) => ({ said, rows: rows.slice(0, final) })));
+  const musing = render(thinking, false, thought)
+    .rows.filter((row) => row)
+    .slice(-glimpse); // its last rows
+  const thoughts = [{ said: "thought" as const, rows: musing.map((row) => pad + row) }];
   const code = [...running.values()].map((text) => ({ said: "tool" as const, rows: [tool(text)] }));
-  const pending = layout([...rendered, ...code]).slice(settled.length);
+  const pending = layout([...rendered, ...thoughts, ...code]).slice(settled.length);
   const finished = settled.slice(printed);
   printed = settled.length;
 
@@ -407,25 +413,32 @@ function reflow() {
   draw();
 }
 
-/** A thought or a reply arrives in pieces. Its rows are printed once they are final. */
-function stream(said: "thought" | "reply", text: string) {
-  if (writing?.said !== said) {
-    end();
-    const own = (writing = { said, text: "", whole: false });
+/** What bee thinks arrives in pieces. Its last rows are shown, below what is printed, until it says or runs something. */
+function think(text: string) {
+  if (writing) end();
+  thinking += text;
+  draw();
+}
+
+/** A reply arrives in pieces. Its rows are printed once they are final. */
+function stream(text: string) {
+  if (!writing) {
+    thinking = "";
+    const own = (writing = { text: "", whole: false });
     const make = () => {
-      const { rows, final } = render(own.text, own.whole, said === "thought" ? thought : 0);
+      const { rows, final } = render(own.text, own.whole);
       return { rows: rows.map((row) => row && pad + row), final };
     };
-    add(said, make, () => `${own.text.length} ${own.whole}`);
+    add("reply", make, () => `${own.text.length} ${own.whole}`);
   }
   writing.text += text;
   draw();
 }
 
-/** The thought or reply is over, if there was one: all of it is final. */
+/** What bee was thinking or saying is over: the thought is gone, and all of the reply is final. */
 function end() {
   if (writing) writing.whole = true;
-  writing = undefined;
+  [writing, thinking] = [undefined, ""];
   draw();
 }
 
@@ -459,8 +472,8 @@ const updates: Record<string, (update: Update) => void> = {
     history.push(content.text);
     user(content.text);
   },
-  agent_thought_chunk: ({ content }) => stream("thought", content.text),
-  agent_message_chunk: ({ content }) => stream("reply", content.text),
+  agent_thought_chunk: ({ content }) => think(content.text),
+  agent_message_chunk: ({ content }) => stream(content.text),
   tool_call: ({ toolCallId, rawInput }) => {
     end();
     running.set(toolCallId, rawInput.command);
