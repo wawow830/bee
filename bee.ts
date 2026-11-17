@@ -11,8 +11,10 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
+  writeFileSync,
   writeSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -53,17 +55,21 @@ for (const [id, { apiKey, baseUrl }] of Object.entries<any>(JSON.parse(read(MODE
   if (provider) models.setProvider({ ...provider, auth: { apiKey: { name: MODELS, resolve } } });
 }
 
-/** Where pi finds each provider's models as they are now. pi-ai's are as they were at its release. */
-const CATALOG = "https://pi.dev/api/models/providers/";
+/**
+ * Each provider's models as pi.dev lists them, where pi finds them too: pi-ai's are as they were at its release. bee
+ * starts with the lists it fetched last, and fetches them again without waiting, for the next start.
+ */
+const CATALOG = join(HOME, "catalog");
+const catalog = (provider: string) => join(CATALOG, `${provider}.json`);
 
-/** A provider's models, from the catalog. None when it cannot be reached. */
-async function latest(provider: string): Promise<Model<Api>[]> {
-  try {
-    const response = await fetch(CATALOG + provider, { signal: AbortSignal.timeout(3000) });
-    return response.ok ? Object.values(await response.json()) : [];
-  } catch {
-    return [];
-  }
+async function fetchCatalog(provider: string) {
+  const response = await fetch(`https://pi.dev/api/models/providers/${provider}`);
+  if (!response.ok) return;
+  const json = JSON.stringify(await response.json());
+  const temporary = `${catalog(provider)}.${process.pid}`;
+  mkdirSync(CATALOG, { recursive: true });
+  writeFileSync(temporary, json);
+  renameSync(temporary, catalog(provider));
 }
 
 const ref = (model: Model<Api>) => `${model.provider}/${model.id}`;
@@ -71,9 +77,11 @@ const byName = new Intl.Collator("en", { numeric: true }).compare;
 
 /** The models there is a key for, in order of their names: the catalog's over pi-ai's. */
 const shipped = await models.getAvailable();
-const fetched = await Promise.all([...new Set(shipped.map((model) => model.provider))].map(latest));
-const merged = new Map([...shipped, ...fetched.flat()].map((model) => [ref(model), model]));
+const providers = [...new Set(shipped.map((model) => model.provider))];
+const listed = providers.flatMap((provider) => Object.values<Model<Api>>(JSON.parse(read(catalog(provider), "{}"))));
+const merged = new Map([...shipped, ...listed].map((model) => [ref(model), model]));
 const available = [...merged.values()].sort((a, b) => byName(ref(a), ref(b)));
+for (const provider of providers) fetchCatalog(provider).catch(() => {});
 
 // ── Sessions ────────────────────────────────────────────────────────────────
 // A session is a file of lines, written as things happen: messages, and the

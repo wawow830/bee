@@ -23,8 +23,8 @@ Providers go in `~/.bee/agent/models.json`, in the format pi uses:
 `baseUrl` is optional. A key in the environment that [pi-ai](https://www.npmjs.com/package/@earendil-works/pi-ai)
 knows, such as `ANTHROPIC_API_KEY`, works too.
 
-The models are pi's: as bee starts, it asks pi.dev which each provider has, so a model released after pi-ai is there
-too. When pi.dev cannot be reached, the list pi-ai shipped with stands.
+The models are pi's: those pi.dev lists for each provider, over those pi-ai shipped with. bee starts with the lists it
+fetched last, in `~/.bee/agent/catalog`, and fetches them again without waiting, so a new model is there the next time.
 
 | Variable | Meaning |
 | --- | --- |
