@@ -11,6 +11,7 @@ import {
   getSupportedThinkingLevels,
   type Api,
   type AssistantMessage,
+  type CacheRetention,
   type Message,
   type Model,
   type ThinkingLevel,
@@ -31,7 +32,7 @@ console.log = console.error; // stdout carries the protocol and nothing else
 // append after an earlier line. The model can append too. The file is the
 // whole interface, and nothing about a session lives anywhere else.
 
-type Line = { parent: number | null; message?: Message; cwd?: string; model?: string; thinking?: string };
+type Line = { parent: number | null; message?: Message; cwd?: string; model?: string; thinking?: string; cache?: string };
 
 const HOME = process.env.BEE_HOME ?? join(homedir(), ".bee", "agent");
 const SESSIONS = join(HOME, "sessions");
@@ -69,7 +70,7 @@ function append(sid: string, { parent, ...rest }: Partial<Line>) {
   appendFileSync(file(sid), (ended ? "" : "\n") + line + "\n");
 }
 
-/** settings.json is a setting line, {"model": ..., "thinking": ...}. Every new session starts with it. */
+/** settings.json is a setting line, {"model": ..., "thinking": ..., "cache": ...}. Every new session starts with it. */
 const SETTINGS = join(HOME, "settings.json");
 
 function create(cwd: string): string {
@@ -147,6 +148,11 @@ function thinking(lines: Line[]) {
   return clampThinkingLevel(model(lines), wanted as ThinkingLevel);
 }
 
+/** How long the provider keeps the prompt cached: an hour, five minutes, or not at all. */
+const CACHES = [["long", "1 hour"], ["short", "5 minutes"], ["none", "none"]];
+const cache = (lines: Line[]) =>
+  latest(lines, (line) => CACHES.find(([value]) => value === line.cache)?.[0] as CacheRetention) ?? "long";
+
 /** Tokens in the conversation after a reply, as the model counted them. */
 const count = ({ usage }: AssistantMessage) => usage.input + usage.cacheRead + usage.cacheWrite + usage.output;
 
@@ -155,7 +161,7 @@ async function ask(sid: string, signal: AbortSignal): Promise<AssistantMessage> 
   const lines = read(sid);
   const [using, level] = [model(lines), thinking(lines)];
   const reasoning = level === "off" ? undefined : level;
-  const options = { signal, sessionId: sid, reasoning, cacheRetention: "long" as const }; // cached for an hour
+  const options = { signal, sessionId: sid, reasoning, cacheRetention: cache(lines) };
   const stream = models.streamSimple(using, { messages: chain(lines) }, options);
   for await (const event of stream) {
     if (event.type === "text_delta") say(sid, "agent_message", event.delta);
@@ -280,7 +286,7 @@ function replay(sid: string) {
 function options(sid: string) {
   if (!available.length) throw Object.assign(new Error("No provider key is set."), { code: -32000 });
   const lines = read(sid);
-  const select = (id: string, category: string, currentValue: string, values: string[][]) => {
+  const select = (id: string, category: string | undefined, currentValue: string, values: string[][]) => {
     const options = values.map(([value, name]) => ({ value, name }));
     return { id, name: id[0].toUpperCase() + id.slice(1), category, type: "select", currentValue, options };
   };
@@ -289,6 +295,7 @@ function options(sid: string) {
   return [
     select("model", "model", ref(model(lines)), all),
     select("thinking", "thought_level", thinking(lines), levels),
+    select("cache", undefined, cache(lines), CACHES),
   ];
 }
 

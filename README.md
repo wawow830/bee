@@ -30,10 +30,12 @@ knows, such as `ANTHROPIC_API_KEY`, works too.
 Defaults go in `~/.bee/agent/settings.json`, as a setting line. Without it, the first model with a key and `medium`:
 
 ```json
-{ "model": "anthropic/claude-opus-4-5", "thinking": "high" }
+{ "model": "anthropic/claude-opus-4-5", "thinking": "high", "cache": "long" }
 ```
 
-Model and thinking level can be changed per session from the editor, and by the model.
+`cache` is how long the provider keeps the prompt: `long` (an hour, the default), `short` (five minutes) or `none`.
+
+Model, thinking level and cache can be changed per session from the editor, and by the model.
 
 ### In a terminal
 
@@ -46,7 +48,7 @@ bee "…"        # start with a prompt
 ```
 
 Enter sends, Alt-Enter is a new line, Up and Down recall, Esc stops a turn, Ctrl-C clears or quits. Ctrl-A, Ctrl-E,
-Ctrl-W and Ctrl-U edit as in a shell. `/model` and `/thinking` list their values; `/model <id>` sets one, and
+Ctrl-W and Ctrl-U edit as in a shell. `/model`, `/thinking` and `/cache` list their values; `/model <id>` sets one, and
 `/model opus` the one whose id has `opus` in it. `/session` lists the other sessions here, and `/session <words>` opens the
 one with them in its title.
 
@@ -58,8 +60,8 @@ line back to line 0, and that chain is the whole request to the model. Lines are
 no other state: it reads the file before every step. The file is written with the first message, so a session never used leaves none.
 
 **One act does everything.** Appending a line after an earlier one continues the conversation from there. Compaction is
-a summary appended after line 0. A rewind is a line appended after any other. A setting is a line too, `{model}` or
-`{thinking}`, and the latest one in the file holds. Line 0 starts with those in `settings.json`.
+a summary appended after line 0. A rewind is a line appended after any other. A setting is a line too, `{model}`,
+`{thinking}` or `{cache}`, and the latest one in the file holds. Line 0 starts with those in `settings.json`.
 
 **One tool.** `python` runs code in a Python process that lasts as long as the harness does. Its result is whatever the
 code and its child processes wrote, cut to 20,000 characters.
