@@ -265,11 +265,10 @@ function render(text: string, whole: boolean, voice: Voice) {
 
 // ── Screen ──────────────────────────────────────────────────────────────────
 // The screen is bee's own: the transcript, and under it what you have queued and the prompt. The transcript is turns,
-// each what you said and what came of it. A turn shows its answer, the last thing bee said in it, and folds away the
-// work before it: what bee thought and ran, and what it said on the way. Clicking the answer unfolds the work. In it, a
-// thought is its first row and a command its code, and clicking either shows the rest: all of the thought, or what the
-// command printed. A turn with no answer, as one under way has not, has nothing to fold to,
-// and its work is shown. The wheel scrolls, and at the bottom the transcript follows what comes.
+// each what you said and what came of it. A turn shows what you said and the last thing that came of it: the answer,
+// or while bee works, what it is doing. The work before that is folded away, and clicking what you said or the answer
+// unfolds it. A thought is its first row and a command its code, and clicking either shows the rest: all of the
+// thought, or what the command printed. The wheel scrolls, and at the bottom the transcript follows what comes.
 
 type Option = { id: string; currentValue: string; options: { value: string }[] };
 
@@ -335,29 +334,31 @@ function turns() {
 }
 
 /**
- * The transcript as rows. A turn's answer is the last thing in it, once the turn is over, if bee said it. Its work, all
- * between what began the turn and the answer, is shown once the answer is open. Each part of a turn is set apart from
- * the one before by a blank row, and so is each turn.
+ * The transcript as rows. A turn is what began it, its work, and the last thing in it, and its work is shown once what
+ * began it is open. Each part of a turn is set apart from the one before by a blank row, and so is each turn.
  */
 function layout() {
   const rows: Row[] = [];
-  const all = turns();
-  all.forEach((turn, n) => {
-    const head = turn[0].said === "user" || turn[0].said === "note" ? 1 : 0;
-    const answer = turn.at(-1)!;
-    const answered = answer.said === "reply" && !(busy() && n === all.length - 1);
-    const work = turn.slice(head, answered ? -1 : undefined);
-    const parts = [turn.slice(0, head), answered && !answer.open ? [] : work, answered ? [answer] : []];
-    const unfolds = answered && work.length ? answer : undefined; // an answer with no work has nothing to unfold
+  for (const turn of turns()) {
+    const head = turn[0].said === "user" || turn[0].said === "note" ? turn[0] : undefined;
+    const after = turn.slice(head ? 1 : 0);
+    const [work, last] = [after.slice(0, -1), after.slice(-1)];
+    const folds = work.length ? head : undefined; // what opens the turn, if it has work to show
+    // A thought or a command opens itself, and what began the turn or the last thing in it opens the turn.
+    const opens = (entry: Entry) => {
+      if (entry.said === "thought" || entry.said === "tool") return entry;
+      if (entry === head || entry === last[0]) return folds;
+    };
+    const parts = [head ? [head] : [], !head || head.open ? work : [], last];
     for (const part of parts) {
       const own = part.flatMap((entry) => {
-        const opens = entry.said === "thought" || entry.said === "tool" || entry === unfolds;
-        return entry.rows().map((text) => ({ text, click: opens ? () => toggle(entry) : undefined }));
+        const open = opens(entry);
+        return entry.rows().map((text) => ({ text, click: open && (() => toggle(open)) }));
       });
       if (own.length && rows.length) rows.push({ text: "" });
       rows.push(...own);
     }
-  });
+  }
   return rows;
 }
 
