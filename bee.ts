@@ -4,7 +4,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import {
   clampThinkingLevel,
@@ -192,7 +192,9 @@ const pythons = new Map<string, Python>();
 
 function start(sid: string): Python {
   const kernel = join(import.meta.dir, "kernel.py");
-  const child = spawn("python3", [kernel, file(sid)], { cwd: read(sid)[0].cwd, stdio: ["pipe", "pipe", "inherit"] });
+  const PYTHONPATH = [HOME, process.env.PYTHONPATH].filter(Boolean).join(delimiter); // ~/.bee/agent is importable
+  const env = { ...process.env, PYTHONPATH };
+  const child = spawn("python3", [kernel, file(sid)], { cwd: read(sid)[0].cwd, env, stdio: ["pipe", "pipe", "inherit"] });
   const python = { child, replies: createInterface({ input: child.stdout! })[Symbol.asyncIterator]() };
   for (const end of ["exit", "error"]) child.once(end, () => pythons.delete(sid));
   pythons.set(sid, python);
