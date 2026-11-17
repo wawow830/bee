@@ -41,14 +41,13 @@ console.log = console.error; // stdout carries the protocol and nothing else
 const failure = (code: number, message: string) => Object.assign(new Error(message), { code });
 
 // ── Sessions ────────────────────────────────────────────────────────────────
-// A session is a file of lines. Each line follows a parent, named by its line
-// number, and the conversation is the chain from the last line back to line 0.
-// Lines are only ever appended, so compacting and rewinding are the same act:
-// append after an earlier line. The model can append too. The file is the
-// whole interface, and nothing about a session lives anywhere else.
+// A session is a file of lines, and its messages are the conversation. The
+// model can edit the file like any other, so compacting and rewinding are
+// edits. The file is the whole interface, and nothing about a session lives
+// anywhere else.
 
 type Settings = { model?: string; thinking?: string; cache?: string };
-type Line = Settings & { parent: number | null; message?: Message; cwd?: string };
+type Line = Settings & { message?: Message; cwd?: string };
 
 const HOME = process.env.BEE_HOME ?? join(homedir(), ".bee", "agent");
 const SESSIONS = join(HOME, "sessions");
@@ -68,7 +67,7 @@ function text(sid: string): string {
   return readFileSync(file(sid), "utf8");
 }
 
-/** The lines. One that is not JSON is empty, and one that names no earlier line follows the line before it. */
+/** The lines. One that is not JSON is empty. */
 function read(sid: string): Line[] {
   const parse = (json: string) => {
     try {
@@ -77,13 +76,10 @@ function read(sid: string): Line[] {
       return {};
     }
   };
-  return text(sid).trimEnd().split("\n").map(parse).map((line, n) => {
-    const earlier = Number.isInteger(line.parent) && line.parent >= 0 && line.parent < n;
-    return { ...line, parent: earlier ? line.parent : n ? n - 1 : null };
-  });
+  return text(sid).trimEnd().split("\n").map(parse);
 }
 
-/** Append a line after the last one. With its first message, a new session becomes a file. */
+/** Append a line. With its first message, a new session becomes a file. */
 function append(sid: string, line: Settings | { message: Message }) {
   const kept = unwritten.get(sid);
   if (kept && "message" in line) {
@@ -91,8 +87,7 @@ function append(sid: string, line: Settings | { message: Message }) {
     writeFileSync(file(sid), kept);
   }
   const before = text(sid);
-  const parent = before.trimEnd().split("\n").length - 1;
-  const added = (before.endsWith("\n") ? "" : "\n") + JSON.stringify({ parent, ...line }) + "\n";
+  const added = (before.endsWith("\n") ? "" : "\n") + JSON.stringify(line) + "\n";
   if (unwritten.has(sid)) unwritten.set(sid, before + added);
   else appendFileSync(file(sid), added);
 }
@@ -109,15 +104,13 @@ function create(cwd: string): string {
     toolsAdded: [BASH],
     timestamp: Date.now(),
   };
-  unwritten.set(sid, JSON.stringify({ ...defaults, parent: null, cwd, message }) + "\n");
+  unwritten.set(sid, JSON.stringify({ ...defaults, cwd, message }) + "\n");
   return sid;
 }
 
-/** The conversation: the messages from line 0 to the last line, by way of each line's parent. */
-function chain(lines: Line[]): Message[] {
-  const messages: Message[] = [];
-  for (let line = lines.at(-1); line; line = lines[line.parent ?? -1])
-    if (line.message) messages.unshift(line.message);
+/** The conversation: the messages in the file. */
+function conversation(lines: Line[]): Message[] {
+  const messages = lines.flatMap((line) => (line.message ? [line.message] : []));
   // A result follows its call, and one whose call is not in the conversation is not in it either.
   const results = messages.filter((message) => message.role === "toolResult");
   const answers = ({ content }: AssistantMessage) =>
@@ -140,7 +133,7 @@ const BASH = {
 const system = (cwd: string, path: string) => `
 You are an agent in the bee harness.
 session: ${path}
-Each line of the session file is {parent, message}, where parent is the number of the line it follows. Lines are written as they happen: a reply when it ends, a result when its command does. Your context is the messages from the last line back to line 0, each result after its call, and a result whose call is not among them is left out.
+Your context is the messages in the session file, one per line, and you can edit it. Lines are written as they happen: a reply when it ends, a result when its command does. A result whose call is not in the file is left out.
 
 ${instructions(cwd)}`.trim();
 
@@ -189,7 +182,7 @@ async function ask(sid: string, signal: AbortSignal): Promise<AssistantMessage> 
   const { model, thinking, cache } = settings(lines);
   const reasoning = thinking === "off" ? undefined : thinking;
   const request = { signal, sessionId: sid, reasoning, cacheRetention: cache };
-  const stream = models.streamSimple(model, { messages: chain(lines) }, request);
+  const stream = models.streamSimple(model, { messages: conversation(lines) }, request);
   for await (const event of stream) {
     if (event.type === "text_delta") say(sid, "agent_message", event.delta);
     if (event.type === "thinking_delta") say(sid, "agent_thought", event.delta);
@@ -232,7 +225,7 @@ async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<str
       for (const call of calls) if (!signal.aborted) append(sid, { message: await run(sid, call, signal) });
       if (reply.stopReason === "error") throw new Error(reply.errorMessage);
       // The model is asked again while the conversation ends with something other than its own reply.
-      if (chain(read(sid)).at(-1)?.role === "assistant" && !said.length && !signal.aborted)
+      if (conversation(read(sid)).at(-1)?.role === "assistant" && !said.length && !signal.aborted)
         return reply.stopReason === "length" ? "max_tokens" : "end_turn";
     }
   } finally {
@@ -343,7 +336,7 @@ function showResult(sid: string, call: ToolCall, result: ToolResultMessage) {
 /** Show the editor a conversation it has not seen. */
 function replay(sid: string) {
   const calls = new Map<string, ToolCall>();
-  for (const message of chain(read(sid))) {
+  for (const message of conversation(read(sid))) {
     if (message.role === "user") say(sid, "user_message", plain(message.content));
     if (message.role === "toolResult") showResult(sid, calls.get(message.toolCallId)!, message);
     if (message.role !== "assistant") continue;
@@ -399,7 +392,7 @@ const running = new Map<string, Turn>();
 
 /** A session the editor opens, and how full its context was at the last reply. */
 function open(sessionId: string) {
-  const last = chain(read(sessionId)).findLast((message) => message.role === "assistant");
+  const last = conversation(read(sessionId)).findLast((message) => message.role === "assistant");
   if (last) usage(sessionId, last);
   return { sessionId, configOptions: options(sessionId) };
 }
