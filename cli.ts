@@ -62,13 +62,6 @@ const fill = (text: string, size: number) => cut(text, `.{1,${size}}(?=\\s|$)\\s
 /** Rows no wider than `size`, broken at a space where there is one. */
 const wrap = (text: string, size = room()) => fill(text, size).map((row) => row.trimEnd());
 
-/** Text at a glance, as one row: its first line, and `…` if there is more. */
-function glance(text: string, look: Paint) {
-  const [line, ...more] = text.trim().split("\n");
-  const row = line.length > room() || more.length ? line.slice(0, room() - 1) + "…" : line;
-  return pad + look(row);
-}
-
 // ── Markdown ────────────────────────────────────────────────────────────────
 // A reply is shown as it looks. It is read as blocks: a line of prose, code between fences, or a table. Blank lines
 // between blocks are one blank row, and there are none before or after them. While a reply arrives, a row is final
@@ -295,8 +288,8 @@ function render(text: string, whole: boolean, voice: Voice): Rendered {
 // ── Screen ──────────────────────────────────────────────────────────────────
 // The transcript is everything said, each thing shown at the screen's width. Its final rows are printed once, and
 // below them the rest is redrawn: what may yet change, what bee is running, what you have queued, and the prompt.
-// Bee's work, what it thinks and the code it runs, is shown in brief, a row for each thing, or in full with what the
-// code printed. Ctrl-O turns from one to the other. When the screen's width changes, or that, all of it is shown again.
+// Bee's work, what it thinks and the code it runs with what the code printed, is shown all or not at all: Ctrl-O turns
+// from one to the other. When that or the screen's width changes, all of the transcript is shown again.
 
 type Option = { id: string; currentValue: string; options: { value: string }[] };
 
@@ -316,7 +309,7 @@ let prompts = 0; // how many bee has not answered: a turn is under way while the
 let printed = 0; // how many rows of the transcript are printed
 let at = 0; // how many rows the cursor is below the top of what is redrawn
 const transcript: Entry[] = [];
-let brief = true; // whether bee's work is shown in brief, or in full
+let work = false; // whether bee's work is shown
 const running = new Map<string, string>(); // the code of the calls bee is waiting on
 const queued: string[] = []; // waiting for the turn to end
 const history: string[] = []; // what you have said, here and in the sessions opened, for Up to recall
@@ -328,11 +321,11 @@ const clear = () => "\r" + up(at) + "\x1b[J";
 /** Rows, all of them final. */
 const final = (rows: string[]): Rendered => ({ rows, final: rows.length });
 
-/** Add to the transcript. Its rows are made again only when how it is shown, or `version`, changes. */
+/** Add to the transcript. Its rows are made again only when the screen's width, or `version`, changes. */
 function add(said: Said, make: () => Rendered, version = () => "") {
   let made: { at: string; rendered: Rendered } | undefined;
   const render = () => {
-    const at = `${out.columns} ${brief} ${version()}`;
+    const at = `${out.columns} ${version()}`;
     if (made?.at !== at) made = { at, rendered: make() };
     return made.rendered;
   };
@@ -344,14 +337,14 @@ function add(said: Said, make: () => Rendered, version = () => "") {
 const working = (said: Said) => said === "thought" || said === "tool";
 
 /**
- * Things said as rows: of each, its final rows, or all of them. Each is set apart from the one before by a blank row,
- * unless both are bee at work.
+ * Things said as rows: of each, its final rows, or all of them. Bee's work is left out unless it is shown. Each thing is
+ * set apart from the one before by a blank row, unless both are bee at work.
  */
 function layout(entries: { said: Said; rows: string[] }[]) {
   const rows: string[] = [];
   let last: Said | undefined;
   for (const { said, rows: own } of entries) {
-    if (!own.length) continue;
+    if (!own.length || (working(said) && !work)) continue;
     if (last && !(working(said) && working(last))) rows.push("");
     rows.push(...own);
     last = said;
@@ -369,7 +362,7 @@ function current(id: string) {
 function draw() {
   const rendered = transcript.map(({ said, render }) => ({ said, ...render() }));
   const settled = layout(rendered.map(({ said, rows, final }) => ({ said, rows: rows.slice(0, final) })));
-  const code = [...running.values()].map((text) => ({ said: "tool" as const, rows: [glance(text, gray)] }));
+  const code = [...running.values()].map((text) => ({ said: "tool" as const, rows: ran(text, "", gray) }));
   const pending = layout([...rendered, ...code]).slice(settled.length);
   const finished = settled.slice(printed);
   printed = settled.length;
@@ -406,14 +399,14 @@ function draw() {
   at = redrawn.length - below - 1;
 }
 
-/** Show all of the transcript again, as it is shown now: at another width, or in brief or full, it was not. */
+/** Show all of the transcript again, as it is shown now: at another width, or with or without bee's work, it was not. */
 function reflow() {
   out.write("\x1b[H\x1b[2J\x1b[3J"); // the screen, and what scrolled off it, cleared
   [printed, at] = [0, 0];
   draw();
 }
 
-/** Bee's voices. A thought is faint, and its paragraphs run together, as it is bee at work. In brief, it is a glance. */
+/** Bee's voices. A thought is faint, and its paragraphs run together, as it is bee at work. */
 const voices: Record<"thought" | "reply", Voice> = {
   thought: { look: thought, apart: false },
   reply: { look: 0, apart: true },
@@ -425,7 +418,6 @@ function stream(said: "thought" | "reply", text: string) {
     end();
     const own = (writing = { said, text: "", whole: false });
     const make = () => {
-      if (brief && working(said)) return settle([glance(marked(own.text, true).text, faint)], own.whole, 0);
       const { rows, final } = render(own.text, own.whole, voices[said]);
       return { rows: rows.map((row) => row && pad + row), final };
     };
@@ -442,9 +434,8 @@ function end() {
   draw();
 }
 
-/** Code bee ran: in brief, a glance at it; in full, all of it, and under it what it printed. */
+/** Code bee ran, and under it what it printed. */
 function ran(code: string, output: string, look: Paint) {
-  if (brief) return [glance(code, look)];
   const lines = (text: string, paint: Paint, indent = "") =>
     text.split("\n").flatMap((line) => source(indent + line, paint));
   return [...lines(code.trim(), look), ...lines(output.trimEnd(), dark, pad)].map((row) => row && pad + row);
@@ -679,7 +670,7 @@ const keys: Record<string, () => unknown> = {
   "\x1b[C": () => move(cursor + 1), // Right
   "\x1b[A": () => recall(1), // Up
   "\x1b[B": () => recall(-1), // Down
-  "\x0f": () => ((brief = !brief), reflow()), // Ctrl-O: bee's work in full, or in brief
+  "\x0f": () => ((work = !work), reflow()), // Ctrl-O: bee's work, shown or not
   "\x1b": () => busy() && stop(), // Esc
   "\x03": () => (typed ? splice(0, typed.length) : busy() ? stop() : quit()), // Ctrl-C: clears, else stops, else quits
 };

@@ -50,8 +50,7 @@ Enter sends. While bee works, Enter steers: bee reads what you said once the com
 turn. Alt-Enter queues it for when the turn is over. Ctrl-J is a new line. Up and Down recall what you said in the
 session, Esc stops a turn, Ctrl-C clears, stops or quits. Ctrl-A, Ctrl-E, Ctrl-W and Ctrl-U edit as in a shell.
 
-What bee thinks and the commands it runs show a line each. Ctrl-O shows all of them, with what each command printed,
-and turns back.
+Ctrl-O shows bee's work, all that it thought and ran and what each command printed, or hides it again.
 
 `/model`, `/thinking` and `/session` each take a value: `/model opus` is the model with `opus` in its id, and
 `/session` is `new` or the title of another session here. What fits is shown under the prompt as you type. Tab goes
