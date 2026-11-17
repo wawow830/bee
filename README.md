@@ -68,7 +68,7 @@ code and its child processes wrote, cut to 20,000 characters.
 Python, after the harness restarts or the old one dies, runs the session's imports and definitions again, loads the
 saved variables, and tells the model which names came back. Open files, threads and child processes do not come back.
 
-**`~/.bee/agent` is importable** from the Python session, so modules kept there come back after a restart too.
+**`~/.bee/agent` is on the Python path.** A module kept there can be imported in any session.
 
 **The model runs the harness** with that tool, by appending lines to the session file. There is no API for it, and
 the prompt only says where the file is. The harness writes each reply and its results after whatever the reply's code
