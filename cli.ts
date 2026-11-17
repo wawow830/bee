@@ -265,11 +265,12 @@ function render(text: string, whole: boolean, voice: Voice) {
 
 // ── Screen ──────────────────────────────────────────────────────────────────
 // The screen is bee's own: the transcript, and under it what you have queued and the prompt. The transcript is turns,
-// each what you said and what came of it. Once a turn is over it shows what you said and the answer, the last thing
-// bee said, and folds away the work before it: what bee thought and ran, and what it said on the way. Clicking what
-// you said or the answer unfolds it. While bee works, there is no answer yet, and the work is shown. In it, each thing
-// is its first row, and clicking it shows all of it: the whole thought, or the whole command and what it printed. The
-// wheel scrolls, and at the bottom the transcript follows what comes.
+// each what you said and what came of it. Its answer is the last thing bee said, if nothing came after it, and is
+// shown whole as it comes. Before it is the work: what bee thought and ran, and what it said on the way. While bee
+// works, the work is shown, each thing as its first row, and clicking it shows all of it: the whole thought, or the
+// whole command and what it printed. Once the turn is over, ended or stopped, the work folds away behind what you said,
+// and clicking what you said or the answer unfolds it. The wheel scrolls, and at the bottom the transcript follows
+// what comes. On leaving, the transcript is left in the terminal as it was last shown.
 
 type Option = { id: string; currentValue: string; options: { value: string }[] };
 
@@ -279,8 +280,14 @@ type Said = "user" | "thought" | "reply" | "tool" | "note";
 /** A thing in the transcript: its rows at the screen's width, and whether it is open. */
 type Entry = { said: Said; rows: () => string[]; open: boolean };
 
-/** A row on screen, and what clicking it does. */
-type Row = { text: string; click?: () => void };
+/** A row on screen, what clicking it does, and which of the rows shown of which entry it is. */
+type Row = { text: string; click?: () => void; of?: { entry: Entry; n: number; rows: string[] } };
+
+/**
+ * A row kept at the top: its entry, how many characters of the entry come before it, how many blank rows it and those
+ * after it are before the next characters, and how many rows are above it on screen.
+ */
+type Kept = { entry: Entry; before: number; blank: number; above: number };
 
 /** A command bee ran: its code, how it ended, and what it printed. */
 type Call = { code: string; status: string; output: string };
@@ -294,6 +301,7 @@ let options: Option[] = []; // the session's settings
 let prompts = 0; // how many bee has not answered: a turn is under way while there are any
 let top: number | undefined; // the first row of the transcript on screen, once you have scrolled; else it follows
 let at = 0; // the first row of the transcript on screen
+let kept: Kept | undefined; // the row at the top, kept there while the screen is resized, until you scroll again
 let shown: Row[] = []; // the rows of the transcript on screen
 const transcript: Entry[] = [];
 const ran = new Map<string, Call>(); // what bee ran, by the id of its call
@@ -318,9 +326,15 @@ function add(said: Said, make: () => string[], version = () => "") {
   draw();
 }
 
+/** Show the transcript from row `to`, or, with none, follow it. */
+function scroll(to?: number) {
+  top = to;
+  kept = undefined;
+}
+
 /** Open what is shut, or shut what is open. What is above it stays where it is on screen. */
 function toggle(entry: Entry) {
-  top = at;
+  scroll(at);
   entry.open = !entry.open;
 }
 
@@ -334,16 +348,17 @@ function turns() {
   return all;
 }
 
-/** Rows that, clicked, open `opens` if it is shut, or else shut it. */
-function clicked(texts: string[], opens?: Entry): Row[] {
-  return texts.map((text) => ({ text, click: opens && (() => toggle(opens)) }));
+/** The rows shown of `entry`, which, clicked, open `opens` if it is shut, or else shut it. */
+function clicked(entry: Entry, texts: string[], opens?: Entry): Row[] {
+  const click = opens && (() => toggle(opens));
+  return texts.map((text, n) => ({ text, click, of: { entry, n, rows: texts } }));
 }
 
 /**
- * The transcript as rows. A turn's answer is the last thing in it, once the turn is over, if bee said it. Its work, all
- * between what began the turn and the answer, is shown while there is no answer, or once what began the turn is open.
- * In the work, a thing shut is its first row. Each part of a turn is set apart from the one before by a blank row, and
- * so is each turn.
+ * The transcript as rows. A turn's answer is the last thing in it, if bee said it. Its work, all between what began
+ * the turn and the answer, is shown while the turn is under way, or once what began the turn is open. In the work, a
+ * thing shut is its first row. Each part of a turn is set apart from the one before by a blank row, and so is each
+ * turn.
  */
 function layout() {
   const rows: Row[] = [];
@@ -351,14 +366,15 @@ function layout() {
   all.forEach((turn, n) => {
     const head = turn[0].said === "user" || turn[0].said === "note" ? turn[0] : undefined;
     const after = turn.slice(head ? 1 : 0);
-    const answer = after.at(-1)?.said === "reply" && !(busy() && n === all.length - 1) ? after.at(-1) : undefined;
+    const answer = after.at(-1)?.said === "reply" ? after.at(-1) : undefined;
     const work = answer ? after.slice(0, -1) : after;
-    const folds = answer && work.length ? head : undefined; // what you said opens the turn, if it has work to fold
+    const over = !(busy() && n === all.length - 1);
+    const folds = over && work.length ? head : undefined; // what you said opens the turn, once it has work to fold
     const shut = folds && !folds.open;
     const parts = [
-      head ? clicked(head.rows(), folds) : [],
-      shut ? [] : work.flatMap((entry) => clicked(entry.open ? entry.rows() : entry.rows().slice(0, 1), entry)),
-      answer ? clicked(answer.rows(), folds) : [],
+      head ? clicked(head, head.rows(), folds) : [],
+      shut ? [] : work.flatMap((entry) => clicked(entry, entry.open ? entry.rows() : entry.rows().slice(0, 1), entry)),
+      answer ? clicked(answer, answer.rows(), folds) : [],
     ];
     for (const own of parts) {
       if (own.length && rows.length) rows.push({ text: "" });
@@ -411,6 +427,36 @@ function draw() {
   const column = pad.length + before.at(-1)!.length + 1;
   const drawn = screen.map((row) => row + "\x1b[K").join("\r\n");
   out.write(`\x1b[?2026h\x1b[H${drawn}\x1b[J\x1b[${screen.length - below};${column}H\x1b[?2026l`);
+}
+
+/** How many characters a row shows, but for spaces and looks: the same, however wide the rows of a text are. */
+const characters = (row: string) => row.replace(/\x1b\[[\d;]*m|\s/g, "").length;
+
+/** How many of `rows` just before row `n` show no characters. */
+const blanks = (rows: string[], n: number) => n - 1 - rows.findLastIndex((row, m) => m < n && characters(row));
+
+/**
+ * Draw the screen again at its new width. Once you have scrolled, the row at the top stays at the top, with as many
+ * rows above it on screen: of the same entry, the row the same character is in.
+ */
+function resize() {
+  const above = shown.findIndex((row) => row.of);
+  const was = shown[above]?.of;
+  if (top !== undefined && was && !kept) {
+    const before = was.rows.slice(0, was.n).reduce((sum, row) => sum + characters(row), 0);
+    const blank = was.rows.slice(was.n).findIndex(characters);
+    kept = { entry: was.entry, before, blank: blank < 0 ? was.rows.length - was.n : blank, above };
+  }
+  const rows = kept ? layout() : [];
+  const first = rows.findIndex((row) => row.of?.entry === kept!.entry);
+  if (kept && first >= 0) {
+    const own = rows[first].of!.rows;
+    let [n, sum] = [0, 0]; // the row the character is in, and how many come before it
+    while (n < own.length - 1 && sum + characters(own[n]) <= kept.before) sum += characters(own[n++]);
+    if (sum === kept.before) n -= Math.min(kept.blank, blanks(own, n));
+    top = Math.max(0, first + n - kept.above);
+  }
+  draw();
 }
 
 /** Bee's voices. A thought is faint, and its paragraphs run together. */
@@ -524,7 +570,8 @@ bee.on("exit", (status) => quit(status ?? 1));
 
 /** Leave the terminal as it was found. */
 function quit(status = 0, message = ""): never {
-  out.write("\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?1049l" + message); // as it was when bee began
+  const left = layout().map((row) => row.text + "\n"); // the transcript, as it was last shown
+  out.write("\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?1049l" + left.join("") + message); // as it was when bee began
   process.exit(status);
 }
 
@@ -653,7 +700,7 @@ function enter(wait = false) {
   if (!text) return;
   history.push(text);
   back = 0;
-  top = undefined; // the transcript follows again
+  scroll(); // the transcript follows again
   splice(0, typed.length);
   if (wait || hint || !busy()) return queue(hint ?? text);
   prompt(text).catch((error) => note(error.message, red));
@@ -685,8 +732,8 @@ const keys: Record<string, () => unknown> = {
 /** What a press of the mouse does, by its button, at a row on screen. */
 const buttons: Record<number, (row: number) => unknown> = {
   0: (row) => shown[row - 1]?.click?.(), // the left button: what the row does
-  64: () => (top = Math.max(0, at - scrolled)), // the wheel, up
-  65: () => (top = at + scrolled), // the wheel, down
+  64: () => scroll(Math.max(0, at - scrolled)), // the wheel, up
+  65: () => scroll(at + scrolled), // the wheel, down
 };
 
 /** Take what the terminal sends, a key or a press of the mouse at a time. */
@@ -713,7 +760,7 @@ const latest = resume ? (await sessions().catch(fatal)).find((session) => sessio
 await open(latest?.sessionId).catch(fatal);
 
 process.stdin.setRawMode(true).setEncoding("utf8").on("data", press);
-out.on("resize", draw);
+out.on("resize", resize);
 setInterval(() => busy() && draw(), frame); // the mark turns while bee works
 
 if (first) queue(first);
