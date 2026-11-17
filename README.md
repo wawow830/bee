@@ -64,9 +64,8 @@ things happen and only ever appended. Its first line is how it began: its workin
 harness reads the file before every step and keeps no other state. For each setting, `{model}`, `{thinking}` or
 `{cache}`, the latest line holds.
 
-**One tool.** `bash` runs a command in a new bash in the working directory. `cd` does not persist between calls. Its
-result is whatever the command wrote, cut to 12,000 characters. If what it wrote is an image, the model sees the image.
-The computer is what lasts: files, and whatever the command left running.
+**One tool.** `bash`. Each call is a fresh bash in the working directory. It returns stdout and stderr, cut at 12,000
+characters, or the image written. The computer is what lasts: files, and whatever a command left running.
 
 **The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model what
 to do. Instructions are yours, in `AGENTS.md`, from `~/.bee/agent` and every directory from the root down to the working
