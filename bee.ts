@@ -149,7 +149,7 @@ function thinking(lines: Line[]) {
 }
 
 /** How long the prompt stays cached: "long" is an hour, "short" five minutes. */
-const cache = (lines: Line[]) => latest(lines, (line) => line.cache) ?? "long";
+const cache = (lines: Line[]) => latest(lines, (line) => line.cache) ?? "short";
 
 /** Tokens in the conversation after a reply, as the model counted them. */
 const count = ({ usage }: AssistantMessage) => usage.input + usage.cacheRead + usage.cacheWrite + usage.output;
