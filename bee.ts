@@ -15,7 +15,7 @@ import {
   statSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import {
   clampThinkingLevel,
@@ -58,16 +58,14 @@ const ref = (model: Model<Api>) => `${model.provider}/${model.id}`;
 // A session is a file of lines, written as things happen: messages, and the
 // settings chosen. Lines are only appended, so every request begins with the
 // last one, and the provider's cache of it holds. The first line is how the
-// session began: the prompt and the tool, and the settings in settings.json. It
-// is written with the first thing that happens, so a session never used leaves
-// no file. A session's id is its file's path, in a folder for its directory.
+// session began: its directory, the prompt and the tool, and the settings in
+// settings.json.
 
 type Settings = { model?: string; thinking?: string; cache?: string };
-type Line = Settings & { message?: Message };
+type Line = Settings & { message?: Message; cwd?: string };
 
 const SESSIONS = join(HOME, "sessions");
-const folder = (cwd: string) => join(SESSIONS, encodeURIComponent(cwd));
-const cwdOf = (sid: string) => decodeURIComponent(basename(dirname(sid)));
+const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
 
 const BASH = {
   name: "bash",
@@ -89,11 +87,12 @@ function instructions(cwd: string) {
 }
 
 /** How a session begins. */
-const beginning = (sid: string): Line => ({
+const beginning = (cwd: string): Line => ({
   ...JSON.parse(read(join(HOME, "settings.json"), "{}")),
+  cwd,
   message: {
     role: "system",
-    content: `You are an agent in the bee harness.\n\n${instructions(cwdOf(sid))}`.trim(),
+    content: `You are an agent in the bee harness.\n\n${instructions(cwd)}`.trim(),
     toolsAdded: [BASH],
     timestamp: Date.now(),
   },
@@ -101,8 +100,7 @@ const beginning = (sid: string): Line => ({
 
 /** A session's lines. One that is not JSON is empty. */
 function lines(sid: string): Line[] {
-  if (dirname(dirname(sid)) !== SESSIONS) throw failure(-32002, `No session ${sid}`);
-  if (!existsSync(sid)) return [beginning(sid)];
+  if (!/^[\w-]+$/.test(sid) || !existsSync(file(sid))) throw failure(-32002, `No session ${sid}`);
   const parse = (json: string) => {
     try {
       return JSON.parse(json) ?? {};
@@ -110,14 +108,11 @@ function lines(sid: string): Line[] {
       return {};
     }
   };
-  return read(sid).trimEnd().split("\n").map(parse);
+  return read(file(sid)).trimEnd().split("\n").map(parse);
 }
 
-function append(sid: string, line: Line) {
-  mkdirSync(dirname(sid), { recursive: true, mode: 0o700 });
-  const added = existsSync(sid) ? [line] : [beginning(sid), line];
-  appendFileSync(sid, added.map((one) => JSON.stringify(one) + "\n").join(""));
-}
+const append = (sid: string, line: Line) => appendFileSync(file(sid), JSON.stringify(line) + "\n");
+const cwdOf = (sid: string) => lines(sid)[0].cwd!;
 
 const conversation = (sid: string) => lines(sid).flatMap((line) => (line.message ? [line.message] : []));
 
@@ -173,10 +168,7 @@ const turns = new Map<string, Turn>();
 async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<string> {
   try {
     for (;;) {
-      for (const message of said.splice(0)) {
-        append(sid, { message });
-        say(sid, "user_message", plain(message.content));
-      }
+      for (const message of said.splice(0)) append(sid, { message });
       if (signal.aborted) return "cancelled";
       const reply = await ask(sid, signal);
       const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
@@ -335,15 +327,14 @@ function options(sid: string) {
 
 /** The sessions, latest first. One's title is the start of what the user first said in it. */
 function list(cwd?: string) {
-  const folders = cwd ? [folder(cwd)] : readdirSync(SESSIONS).map((name) => join(SESSIONS, name));
-  return folders
-    .filter(existsSync)
-    .flatMap((dir) => readdirSync(dir).map((name) => join(dir, name)))
+  return readdirSync(SESSIONS)
+    .map((name) => name.slice(0, -".jsonl".length))
     .map((sessionId) => {
       const first = conversation(sessionId).find((message) => message.role === "user")?.content ?? "";
-      const updatedAt = statSync(sessionId).mtime.toISOString();
+      const updatedAt = statSync(file(sessionId)).mtime.toISOString();
       return { sessionId, cwd: cwdOf(sessionId), title: plain(first).slice(0, 80) || undefined, updatedAt };
     })
+    .filter((session) => !cwd || session.cwd === cwd)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
@@ -375,7 +366,11 @@ const handlers: Record<string, (params: any) => unknown> = {
       sessionCapabilities: { list: {}, resume: {} },
     },
   }),
-  "session/new": ({ cwd }) => open(join(folder(cwd), randomUUID() + ".jsonl")),
+  "session/new": ({ cwd }) => {
+    const sessionId = randomUUID();
+    append(sessionId, beginning(cwd));
+    return open(sessionId);
+  },
   "session/resume": ({ sessionId }) => open(sessionId),
   "session/load": ({ sessionId }) => {
     replay(sessionId);

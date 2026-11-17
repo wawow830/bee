@@ -48,7 +48,7 @@ function tool(code: string, output = "", tint = gray) {
 
 // ── Screen ──────────────────────────────────────────────────────────────────
 // Finished rows are printed once. Below them the rest is redrawn: what bee is writing, running or thinking,
-// what you have sent into the turn and what you have queued, and the prompt.
+// what you have queued, and the prompt.
 
 let typed = ""; // the prompt, and where the cursor is in it
 let cursor = 0;
@@ -62,7 +62,6 @@ let printed = false; // whether anything is, yet
 let at = 0; // how many rows the cursor is below the top of what is redrawn
 let options: { id: string; currentValue: string; options: { value: string }[] }[] = [];
 const running = new Map<string, string>(); // the code of the calls bee is waiting on
-const steered: string[] = []; // sent into the turn under way, until bee reads them
 const queued: string[] = []; // waiting for the turn to end
 const history: string[] = []; // what you have said, here and in the sessions opened, for Up to recall
 
@@ -89,8 +88,7 @@ function draw(finished: string[] = []) {
     ...(reply.trim() ? [...(begun ? [] : [""]), "  " + markdown(reply)] : []),
     ...[...running.values()].flatMap((code) => ["", ...tool(code)]),
     ...(busy() && thinking ? ["", "  " + gray(italic(thinking))] : []),
-    ...steered.map((text) => gray(pending(text))),
-    ...queued.map((text) => dark(pending(text))),
+    ...queued.map((text) => dark("› " + text.split("\n")[0].slice(0, out.columns - 3))),
     "",
     `${amber(mark)} ${input[0].padEnd(size)}  ${dark(status)}`,
     ...input.slice(1).map((row) => "  " + row),
@@ -103,9 +101,6 @@ function draw(finished: string[] = []) {
   out.write(`\x1b[?2026h${clear()}${rows.join("\n")}${up(below)}\x1b[${3 + before.at(-1)!.length}G\x1b[?2026l`);
   at = rows.length - finished.length - below - 1;
 }
-
-/** A message not yet read, as one row. */
-const pending = (text: string) => "› " + text.split("\n")[0].slice(0, out.columns - 3);
 
 /** Print finished rows, set apart from those before them unless they carry on a reply. */
 function print(rows: string[], apart = true) {
@@ -144,11 +139,9 @@ function note(text: string, look = gray) {
 }
 
 const updates: Record<string, (update: any) => void> = {
-  // bee says what you said once it is in the conversation, and all of it when a session is opened.
+  // What was said in a session opened.
   user_message_chunk: ({ content }) => {
-    if (loading) history.push(content.text);
-    const at = steered.indexOf(content.text);
-    if (at >= 0) steered.splice(at, 1);
+    history.push(content.text);
     user(content.text);
   },
   agent_message_chunk: ({ content }) => stream(content.text),
@@ -212,17 +205,13 @@ type Session = { sessionId: string; title?: string };
 
 const cwd = process.cwd();
 let sessionId = "";
-let loading = false; // while a session opened shows what was said in it
 
 const sessions = async (): Promise<Session[]> => (await call("session/list", { cwd })).sessions;
 
 /** Open the session named, showing what was said in it, or else a new one. */
 async function open(id?: string) {
   usage = "";
-  loading = true;
-  const opened = await call(id ? "session/load" : "session/new", { sessionId: id, cwd, mcpServers: [] }).finally(
-    () => (loading = false),
-  );
+  const opened = await call(id ? "session/load" : "session/new", { sessionId: id, cwd, mcpServers: [] });
   sessionId = id ?? opened.sessionId;
   options = opened.configOptions;
   others = (await sessions()).filter((session) => session.title && session.sessionId !== sessionId);
@@ -230,10 +219,10 @@ async function open(id?: string) {
 
 /** Send bee a prompt, and wait for its turn to end. One sent while a turn is under way joins it. */
 async function prompt(text: string) {
+  user(text);
   prompts++;
   const done = () => {
     if (--prompts) return; // the turn answers each prompt in it
-    steered.length = 0; // what it did not read, if it failed
     thought = "";
     end();
   };
@@ -342,7 +331,6 @@ function enter(wait = false) {
   back = 0;
   splice(0, typed.length);
   if (wait || hint || !busy()) return queue(hint ?? text);
-  steered.push(text);
   prompt(text).catch((error) => note(error.message, red));
 }
 

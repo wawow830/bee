@@ -56,10 +56,9 @@ through it, and Enter takes the first once only one fits.
 
 ## How it works
 
-**A session is a file.** `~/.bee/agent/sessions/<working directory, URL-encoded>/<id>.jsonl`, and its path is its id. It
-holds one line per message or setting chosen, written as things happen and only ever appended. Its first line is how it
-began: the prompt, with the `AGENTS.md` files, the tool, and the settings in `settings.json`. That line is written with
-the first thing that happens, so a session never used leaves no file.
+**A session is a file.** `~/.bee/agent/sessions/<id>.jsonl` holds one line per message or setting chosen, written as
+things happen and only ever appended. Its first line is how it began: its working directory, the prompt with the
+`AGENTS.md` files, the tool, and the settings in `settings.json`.
 
 **Every request is the file's messages.** So each begins as the last one did, and the provider's cache of it holds. The
 harness reads the file before every step and keeps no other state. For each setting, `{model}`, `{thinking}` or
