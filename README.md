@@ -55,7 +55,8 @@ one with them in its title.
 **A session is a file.** `~/.bee/agent/sessions/<id>.jsonl` holds one line per message, each `{parent, message}`, where
 `parent` is the number of the line it follows. Line 0 is the system prompt. The conversation is the chain from the last
 line back to line 0, and that chain is the whole request to the model. Lines are only appended, and the harness keeps
-no other state: it reads the file before every step. The file is written with the first message, so a session never used leaves none.
+no other state: it reads the file before every step. Only a new session waits in memory: its file is written with the
+first message, so a session never used leaves none.
 
 **One act does everything.** Appending a line after an earlier one continues the conversation from there. Compaction is
 a summary appended after line 0. A rewind is a line appended after any other. A setting is a line too, `{model}`,
@@ -77,7 +78,8 @@ appended, so the model continues from its own line. This is how it can compact i
 **The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model
 what to do. Instructions are yours, in `AGENTS.md`.
 
-**The file forgives.** A line that is not JSON, or that names no earlier line, follows the line before it.
+**The file forgives.** A line that is not JSON, or that names no earlier line, follows the line before it. A setting
+whose value means nothing is skipped, and the one before it holds.
 
 **Instructions** come from `AGENTS.md` in `~/.bee/agent` and in every directory from the root down to the working
 directory. They are read once, when the session is created.
