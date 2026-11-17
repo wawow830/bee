@@ -4,8 +4,8 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import {
-  appendFileSync,
   closeSync,
+  constants,
   existsSync,
   mkdirSync,
   openSync,
@@ -13,6 +13,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  writeSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -113,7 +114,24 @@ function lines(sid: string): Line[] {
   return read(file(sid)).trimEnd().split("\n").map(parse);
 }
 
-const append = (sid: string, line: Line) => appendFileSync(file(sid), JSON.stringify(line) + "\n");
+/**
+ * Add a line to a session. Only its beginning makes the file, so a session deleted stays deleted: a line written
+ * to a new file would be a session with no beginning, which no model will take and no one can list.
+ */
+function append(sid: string, line: Line, flag: string | number = constants.O_WRONLY | constants.O_APPEND) {
+  let fd: number;
+  try {
+    fd = openSync(file(sid), flag);
+  } catch (error: any) {
+    throw error.code === "ENOENT" ? failure(-32002, `No session ${sid}`) : error;
+  }
+  try {
+    writeSync(fd, JSON.stringify(line) + "\n");
+  } finally {
+    closeSync(fd);
+  }
+}
+
 const cwdOf = (sid: string) => lines(sid)[0].cwd!;
 
 const conversation = (sid: string) => lines(sid).flatMap((line) => (line.message ? [line.message] : []));
@@ -368,7 +386,7 @@ const handlers: Record<string, (params: any) => unknown> = {
   }),
   "session/new": ({ cwd }) => {
     const sessionId = randomUUID();
-    append(sessionId, beginning(cwd));
+    append(sessionId, beginning(cwd), "wx");
     return open(sessionId);
   },
   "session/resume": ({ sessionId }) => open(sessionId),
