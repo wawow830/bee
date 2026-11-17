@@ -56,7 +56,8 @@ through it, and Enter takes the first once only one fits.
 ## How it works
 
 **A session is a file.** `~/.bee/agent/sessions/<id>.jsonl` holds one line per message, and its messages are the
-whole request to the model. Line 0 is the system prompt. The harness keeps no other state: it reads the file before
+whole request to the model. Line 0 is the system prompt. A reply is kept without its thinking, which the editor sees as
+it comes: the provider refuses a request with the model's thinking in its input, and the model reads this file. The harness keeps no other state: it reads the file before
 every step. Only a new session waits in memory: its file is written with the first message, so a session never used
 leaves none.
 
@@ -77,7 +78,8 @@ reply.
 **The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model
 what to do. Instructions are yours, in `AGENTS.md`.
 
-**The file forgives.** A line that is not JSON is skipped. A setting whose value means nothing is skipped, and the one
+**The file forgives.** A line that is not JSON is skipped, and so is a reply the model did not return, one without its
+usage. A setting whose value means nothing is skipped, and the one
 before it holds.
 
 **Instructions** come from `AGENTS.md` in `~/.bee/agent` and in every directory from the root down to the working

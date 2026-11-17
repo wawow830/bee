@@ -110,7 +110,9 @@ function create(cwd: string): string {
 
 /** The conversation: the messages in the file. */
 function conversation(lines: Line[]): Message[] {
-  const messages = lines.flatMap((line) => (line.message ? [line.message] : []));
+  // A reply is one the model returned, with its usage. One written into the file by hand is not a reply.
+  const returned = (message: Message) => message.role !== "assistant" || message.usage;
+  const messages = lines.flatMap((line) => (line.message && returned(line.message) ? [line.message] : []));
   // A result follows its call, and one whose call is not in the conversation is not in it either.
   const results = messages.filter((message) => message.role === "toolResult");
   const answers = ({ content }: AssistantMessage) =>
@@ -133,7 +135,7 @@ const BASH = {
 const system = (cwd: string, path: string) => `
 You are an agent in the bee harness.
 session: ${path}
-Your context is the messages in the session file, one per line, and you can edit it. Lines are written as they happen: a reply when it ends, a result when its command does. A result whose call is not in the file is left out.
+Your context is the messages in the session file, one per line, and you can edit it. Lines are written as they happen: a reply when it ends, a result when its command does. A reply the model did not return, or a result whose call is not in the file, is left out.
 
 ${instructions(cwd)}`.trim();
 
@@ -221,7 +223,8 @@ async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<str
       }
       const reply = await ask(sid, signal);
       const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
-      append(sid, { message: reply });
+      // Its thinking is shown as it comes, and not kept: a request with the model's thinking in its input is refused.
+      append(sid, { message: { ...reply, content: reply.content.filter((block) => block.type !== "thinking") } });
       for (const call of calls) if (!signal.aborted) append(sid, { message: await run(sid, call, signal) });
       if (reply.stopReason === "error") throw new Error(reply.errorMessage);
       // The model is asked again while the conversation ends with something other than its own reply.
