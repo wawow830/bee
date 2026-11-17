@@ -141,8 +141,8 @@ function prose(line: string, done: boolean, look: number) {
   const heading = line.match(/^#{1,6}\s+(.*)/);
   const [, indent = "", item = "", body = line] = heading ? [] : (line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)/) ?? []);
   const lead = item && indent + (/\d/.test(item) ? item : "•") + " ";
-  const rows = paint(marked(heading?.[1] ?? body, done, heading ? look | strong : look), room(pad.length + lead.length));
-  return hang(looks(look)(dark(lead)), rows);
+  const text = marked(heading?.[1] ?? body, done, heading ? look | strong : look);
+  return hang(looks(look)(dark(lead)), paint(text, room(pad.length + lead.length)));
 }
 
 /** A line of code, as it is. Its rows hang under where its text begins. */
@@ -266,8 +266,9 @@ function render(text: string, whole: boolean, voice: Voice) {
 // ── Screen ──────────────────────────────────────────────────────────────────
 // The screen is bee's own: the transcript, and under it what you have queued and the prompt. The transcript is turns,
 // each what you said and what came of it. A turn shows its answer, the last thing bee said in it, and folds away the
-// work before it: what bee thought and ran, and what it said on the way. Clicking the answer unfolds the work, and
-// clicking a command shows what it printed. A turn with no answer, as one under way has not, has nothing to fold to,
+// work before it: what bee thought and ran, and what it said on the way. Clicking the answer unfolds the work. In it, a
+// thought is its first row and a command its code, and clicking either shows the rest: all of the thought, or what the
+// command printed. A turn with no answer, as one under way has not, has nothing to fold to,
 // and its work is shown. The wheel scrolls, and at the bottom the transcript follows what comes.
 
 type Option = { id: string; currentValue: string; options: { value: string }[] };
@@ -347,9 +348,10 @@ function layout() {
     const answered = answer.said === "reply" && !(busy() && n === all.length - 1);
     const work = turn.slice(head, answered ? -1 : undefined);
     const parts = [turn.slice(0, head), answered && !answer.open ? [] : work, answered ? [answer] : []];
+    const unfolds = answered && work.length ? answer : undefined; // an answer with no work has nothing to unfold
     for (const part of parts) {
       const own = part.flatMap((entry) => {
-        const opens = entry.said === "tool" || (entry === answer && answered && work.length > 0);
+        const opens = entry.said === "thought" || entry.said === "tool" || entry === unfolds;
         return entry.rows().map((text) => ({ text, click: opens ? () => toggle(entry) : undefined }));
       });
       if (own.length && rows.length) rows.push({ text: "" });
@@ -410,12 +412,15 @@ const voices: Record<"thought" | "reply", Voice> = {
   reply: { look: 0, apart: true },
 };
 
-/** A thought or a reply arrives in pieces. */
+/** A thought or a reply arrives in pieces. A thought, until it is open, is its first row. */
 function stream(said: "thought" | "reply", text: string) {
   if (writing?.said !== said) {
     end();
     const own = (writing = { said, text: "", whole: false });
-    const make = () => render(own.text, own.whole, voices[said]).map((row) => row && pad + row);
+    const make = (open: boolean) => {
+      const rows = render(own.text, own.whole, voices[said]).map((row) => row && pad + row);
+      return said === "thought" && !open ? rows.slice(0, 1) : rows;
+    };
     add(said, make, () => `${own.text.length} ${own.whole}`);
   }
   writing.text += text;
@@ -474,7 +479,8 @@ const updates: Record<string, (update: Update) => void> = {
     end();
     const call: Call = { code: rawInput.command ?? "", status: "", output: "" };
     ran.set(toolCallId, call);
-    add("tool", (open) => shell(call, open), () => call.status);
+    const rows = (open: boolean) => shell(call, open);
+    add("tool", rows, () => call.status);
   },
   tool_call_update: ({ toolCallId, status, rawOutput }) => {
     const call = ran.get(toolCallId);
