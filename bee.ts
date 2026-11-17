@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import {
   clampThinkingLevel,
@@ -125,13 +125,14 @@ function chain(lines: Line[]): Message[] {
 
 const BASH = {
   name: "bash",
-  description: "Runs a command with bash in cwd. Returns what it wrote to stdout and stderr, cut to 20,000 characters.",
+  description:
+    "Runs a command in a new bash in the working directory. Returns what it wrote to stdout and stderr, cut to " +
+    "20,000 characters, or the image, if that is what it wrote.",
   parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
 };
 
 const system = (cwd: string, path: string) => `
 You are an agent in the bee harness.
-cwd: ${cwd}
 session: ${path}
 Your context is the session file, followed by parent from its last line. You can append to it.
 
@@ -223,30 +224,43 @@ async function turn(sid: string, signal: AbortSignal): Promise<string> {
 
 const SHOWN = 20_000; // characters of output the model sees per call
 
-/** Run a call's command. Returns what it wrote, cut to its two ends when it is too long, and whether it failed. */
-async function bash(sid: string, call: ToolCall, signal: AbortSignal): Promise<{ output: string; failed: boolean }> {
+/** The images a model can see, by how their bytes begin. */
+const IMAGES: Record<string, RegExp> = {
+  "image/png": /^\x89PNG/,
+  "image/jpeg": /^\xff\xd8\xff/,
+  "image/gif": /^GIF8/,
+  "image/webp": /^RIFF....WEBP/s,
+};
+
+type Output = { content: ToolResultMessage["content"]; failed: boolean };
+
+/** Run a call's command. Returns what it wrote, as an image or as text cut to its two ends, and whether it failed. */
+async function bash(sid: string, call: ToolCall, signal: AbortSignal): Promise<Output> {
   const { command } = validateToolCall([BASH], call);
-  const PYTHONPATH = [HOME, process.env.PYTHONPATH].filter(Boolean).join(delimiter); // ~/.bee/agent is importable
   // Written to a file, not a pipe, so the call ends when the command does, whatever it left running.
   const path = join(tmpdir(), `bee-${randomUUID()}`);
-  const written = openSync(path, "w");
+  const out = openSync(path, "w");
   const child = spawn("bash", ["-c", command], {
     cwd: read(sid)[0].cwd,
-    env: { ...process.env, PYTHONPATH },
-    stdio: ["ignore", written, written],
+    stdio: ["ignore", out, out],
     detached: true, // its own process group, so an interrupt stops all of it
   });
   const interrupt = () => process.kill(-child.pid!, "SIGINT");
   signal.addEventListener("abort", interrupt);
   try {
     const [status] = await once(child, "exit");
-    const output = readFileSync(path, "utf8");
-    const cut = output.length - SHOWN;
-    const shown = cut <= 0 ? output : `${output.slice(0, SHOWN / 2)}\n[${cut} characters cut]\n${output.slice(-SHOWN / 2)}`;
-    return { output: shown, failed: status !== 0 };
+    const failed = status !== 0;
+    const written = readFileSync(path);
+    const start = written.subarray(0, 12).toString("latin1");
+    const mimeType = Object.keys(IMAGES).find((type) => IMAGES[type].test(start));
+    if (mimeType) return { content: [{ type: "image", data: written.toString("base64"), mimeType }], failed };
+    const text = written.toString("utf8");
+    const cut = text.length - SHOWN;
+    const shown = cut <= 0 ? text : `${text.slice(0, SHOWN / 2)}\n[${cut} characters cut]\n${text.slice(-SHOWN / 2)}`;
+    return { content: [{ type: "text", text: shown }], failed };
   } finally {
     signal.removeEventListener("abort", interrupt);
-    closeSync(written);
+    closeSync(out);
     rmSync(path);
   }
 }
@@ -254,13 +268,13 @@ async function bash(sid: string, call: ToolCall, signal: AbortSignal): Promise<{
 /** Run one tool call, shown to the editor. Returns its result. */
 async function run(sid: string, call: ToolCall, signal: AbortSignal): Promise<ToolResultMessage> {
   showCall(sid, call);
-  const refused = (error: Error) => ({ output: error.message, failed: true }); // not a call bash can be given
-  const { output, failed } = await bash(sid, call, signal).catch(refused);
+  const refused = (error: Error): Output => ({ content: [{ type: "text", text: error.message }], failed: true });
+  const { content, failed } = await bash(sid, call, signal).catch(refused);
   const result: ToolResultMessage = {
     role: "toolResult",
     toolCallId: call.id,
     toolName: call.name,
-    content: [{ type: "text", text: output }],
+    content,
     isError: failed,
     timestamp: Date.now(),
   };
@@ -300,7 +314,9 @@ function showCall(sid: string, call: ToolCall) {
 function showResult(sid: string, call: ToolCall, result: ToolResultMessage) {
   const status = result.isError ? "failed" : "completed";
   const output = plain(result.content).trim();
-  const content = [fenced(source(call), "bash"), ...(output ? [fenced(output)] : [])];
+  const shown = result.content.filter((block) => block.type === "image" || block.text.trim());
+  const blocks = shown.map((block) => (block.type === "image" ? { type: "content", content: block } : fenced(block.text)));
+  const content = [fenced(source(call), "bash"), ...blocks];
   update(sid, { sessionUpdate: "tool_call_update", toolCallId: call.id, status, content, rawOutput: output });
 }
 

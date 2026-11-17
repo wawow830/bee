@@ -65,9 +65,8 @@ a summary appended after line 0. A rewind is a line appended after any other. A 
 `{thinking}` or `{cache}`, and the latest one in the file holds. Line 0 starts with those in `settings.json`.
 
 **One tool.** `bash` runs a command in a new bash, in the working directory. Its result is whatever the command wrote,
-cut to 20,000 characters. The computer is what lasts: files, and whatever the command left running.
-
-**`~/.bee/agent` is on the Python path.** A module kept there can be imported by any command.
+cut to 20,000 characters. If what it wrote is an image, the model sees the image. The computer is what lasts: files,
+and whatever the command left running.
 
 **The model runs the harness** with that tool, by appending lines to the session file. There is no API for it, and
 the prompt only says where the file is and how it chains. The harness writes each reply and its results after whatever the reply's commands
