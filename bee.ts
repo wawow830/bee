@@ -32,7 +32,7 @@ console.log = console.error; // stdout carries the protocol and nothing else
 // append after an earlier line. The model can append too. The file is the
 // whole interface, and nothing about a session lives anywhere else.
 
-type Line = { parent: number | null; message?: Message; cwd?: string; model?: string; thinking?: string; cache?: string };
+type Line = { parent: number | null; message?: Message; cwd?: string; model?: string; thinking?: string; cache?: CacheRetention };
 
 const HOME = process.env.BEE_HOME ?? join(homedir(), ".bee", "agent");
 const SESSIONS = join(HOME, "sessions");
@@ -148,10 +148,8 @@ function thinking(lines: Line[]) {
   return clampThinkingLevel(model(lines), wanted as ThinkingLevel);
 }
 
-/** How long the provider keeps the prompt cached: an hour, five minutes, or not at all. */
-const CACHES = [["long", "1 hour"], ["short", "5 minutes"], ["none", "none"]];
-const cache = (lines: Line[]) =>
-  latest(lines, (line) => CACHES.find(([value]) => value === line.cache)?.[0] as CacheRetention) ?? "long";
+/** How long the prompt stays cached: "long" is an hour, "short" five minutes. */
+const cache = (lines: Line[]) => latest(lines, (line) => line.cache) ?? "long";
 
 /** Tokens in the conversation after a reply, as the model counted them. */
 const count = ({ usage }: AssistantMessage) => usage.input + usage.cacheRead + usage.cacheWrite + usage.output;
@@ -295,7 +293,7 @@ function options(sid: string) {
   return [
     select("model", "model", ref(model(lines)), all),
     select("thinking", "thought_level", thinking(lines), levels),
-    select("cache", undefined, cache(lines), CACHES),
+    select("cache", undefined, cache(lines), ["long", "short", "none"].map((value) => [value, value])),
   ];
 }
 

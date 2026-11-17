@@ -27,15 +27,13 @@ knows, such as `ANTHROPIC_API_KEY`, works too.
 | --- | --- |
 | `BEE_HOME` | Where bee keeps its files. Without it, `~/.bee/agent` |
 
-Defaults go in `~/.bee/agent/settings.json`, as a setting line. Without it, the first model with a key and `medium`:
+Defaults go in `~/.bee/agent/settings.json`, as a setting line. Without it, the first model with a key, `medium`, and an hour's cache:
 
 ```json
-{ "model": "anthropic/claude-opus-4-5", "thinking": "high", "cache": "long" }
+{ "model": "anthropic/claude-opus-4-5", "thinking": "high", "cache": "short" }
 ```
 
-`cache` is how long the provider keeps the prompt: `long` (an hour, the default), `short` (five minutes) or `none`.
-
-Model, thinking level and cache can be changed per session from the editor, and by the model.
+Each can be changed per session from the editor, and by the model.
 
 ### In a terminal
 
