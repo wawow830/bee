@@ -265,10 +265,11 @@ function render(text: string, whole: boolean, voice: Voice) {
 
 // ── Screen ──────────────────────────────────────────────────────────────────
 // The screen is bee's own: the transcript, and under it what you have queued and the prompt. The transcript is turns,
-// each what you said and what came of it. A turn shows what you said and the last thing that came of it: the answer,
-// or while bee works, what it is doing. The work before that is folded away, and clicking what you said or the answer
-// unfolds it. A thought is its first row and a command its code, and clicking either shows the rest: all of the
-// thought, or what the command printed. The wheel scrolls, and at the bottom the transcript follows what comes.
+// each what you said and what came of it. Once a turn is over it shows what you said and the answer, the last thing bee
+// said, and folds away the work before it: what bee thought and ran, and what it said on the way. Clicking what you said
+// or the answer unfolds it. While bee works, there is no answer yet, and the work is shown. In it, each thing is its
+// first row, and clicking it shows all of it: the whole thought, or the whole command and what it printed. The wheel
+// scrolls, and at the bottom the transcript follows what comes.
 
 type Option = { id: string; currentValue: string; options: { value: string }[] };
 
@@ -301,15 +302,15 @@ const history: string[] = []; // what you have said, here and in the sessions op
 
 const busy = () => prompts > 0;
 
-/** Add to the transcript. Its rows are made again only when the screen's width, whether it is open, or `version` changes. */
-function add(said: Said, make: (open: boolean) => string[], version = () => "") {
+/** Add to the transcript. Its rows are made again only when the screen's width, or `version`, changes. */
+function add(said: Said, make: () => string[], version = () => "") {
   let made: { at: string; rows: string[] } | undefined;
   const entry: Entry = {
     said,
     open: false,
     rows: () => {
-      const at = `${out.columns} ${entry.open} ${version()}`;
-      if (made?.at !== at) made = { at, rows: make(entry.open) };
+      const at = `${out.columns} ${version()}`;
+      if (made?.at !== at) made = { at, rows: make() };
       return made.rows;
     },
   };
@@ -333,32 +334,37 @@ function turns() {
   return all;
 }
 
+/** Rows that, clicked, open `opens` if it is shut, or else shut it. */
+function clicked(texts: string[], opens?: Entry): Row[] {
+  return texts.map((text) => ({ text, click: opens && (() => toggle(opens)) }));
+}
+
 /**
- * The transcript as rows. A turn is what began it, its work, and the last thing in it, and its work is shown once what
- * began it is open. Each part of a turn is set apart from the one before by a blank row, and so is each turn.
+ * The transcript as rows. A turn's answer is the last thing in it, once the turn is over, if bee said it. Its work, all
+ * between what began the turn and the answer, is shown while there is no answer, or once what began the turn is open.
+ * In the work, a thing shut is its first row. Each part of a turn is set apart from the one before by a blank row, and
+ * so is each turn.
  */
 function layout() {
   const rows: Row[] = [];
-  for (const turn of turns()) {
+  const all = turns();
+  all.forEach((turn, n) => {
     const head = turn[0].said === "user" || turn[0].said === "note" ? turn[0] : undefined;
     const after = turn.slice(head ? 1 : 0);
-    const [work, last] = [after.slice(0, -1), after.slice(-1)];
-    const folds = work.length ? head : undefined; // what opens the turn, if it has work to show
-    // A thought or a command opens itself, and what began the turn or the last thing in it opens the turn.
-    const opens = (entry: Entry) => {
-      if (entry.said === "thought" || entry.said === "tool") return entry;
-      if (entry === head || entry === last[0]) return folds;
-    };
-    const parts = [head ? [head] : [], !head || head.open ? work : [], last];
-    for (const part of parts) {
-      const own = part.flatMap((entry) => {
-        const open = opens(entry);
-        return entry.rows().map((text) => ({ text, click: open && (() => toggle(open)) }));
-      });
+    const answer = after.at(-1)?.said === "reply" && !(busy() && n === all.length - 1) ? after.at(-1) : undefined;
+    const work = answer ? after.slice(0, -1) : after;
+    const folds = answer && work.length ? head : undefined; // what you said opens the turn, if it has work to fold
+    const shut = folds && !folds.open;
+    const parts = [
+      head ? clicked(head.rows(), folds) : [],
+      shut ? [] : work.flatMap((entry) => clicked(entry.open ? entry.rows() : entry.rows().slice(0, 1), entry)),
+      answer ? clicked(answer.rows(), folds) : [],
+    ];
+    for (const own of parts) {
       if (own.length && rows.length) rows.push({ text: "" });
       rows.push(...own);
     }
-  }
+  });
   return rows;
 }
 
@@ -413,15 +419,12 @@ const voices: Record<"thought" | "reply", Voice> = {
   reply: { look: 0, apart: true },
 };
 
-/** A thought or a reply arrives in pieces. A thought, until it is open, is its first row. */
+/** A thought or a reply arrives in pieces. */
 function stream(said: "thought" | "reply", text: string) {
   if (writing?.said !== said) {
     end();
     const own = (writing = { said, text: "", whole: false });
-    const make = (open: boolean) => {
-      const rows = render(own.text, own.whole, voices[said]).map((row) => row && pad + row);
-      return said === "thought" && !open ? rows.slice(0, 1) : rows;
-    };
+    const make = () => render(own.text, own.whole, voices[said]).map((row) => row && pad + row);
     add(said, make, () => `${own.text.length} ${own.whole}`);
   }
   writing.text += text;
@@ -435,11 +438,11 @@ function end() {
   draw();
 }
 
-/** Code bee ran, and under it, once it is open, what the code printed. */
-function shell({ code, status, output }: Call, open: boolean) {
+/** Code bee ran, and under it what the code printed. */
+function shell({ code, status, output }: Call) {
   const lines = (text: string, paint: Paint, indent = "") =>
     text.split("\n").flatMap((line) => source(indent + line, paint));
-  const printed = open && output.trim() ? lines(output.trimEnd(), dark, pad) : [];
+  const printed = output.trim() ? lines(output.trimEnd(), dark, pad) : [];
   return [...lines(code.trim(), status === "failed" ? red : gray), ...printed].map((row) => row && pad + row);
 }
 
@@ -480,8 +483,8 @@ const updates: Record<string, (update: Update) => void> = {
     end();
     const call: Call = { code: rawInput.command ?? "", status: "", output: "" };
     ran.set(toolCallId, call);
-    const rows = (open: boolean) => shell(call, open);
-    add("tool", rows, () => call.status);
+    const shown = () => shell(call);
+    add("tool", shown, () => call.status);
   },
   tool_call_update: ({ toolCallId, status, rawOutput }) => {
     const call = ran.get(toolCallId);
