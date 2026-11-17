@@ -423,6 +423,19 @@ const handlers: Record<string, (params: any) => unknown> = {
   },
 };
 
+/**
+ * The editor hung up, or the terminal closed: stop every turn as a cancel does, so each writes down how far it got,
+ * then go. What is said to an editor that is gone is lost, and only the file matters.
+ */
+async function hangUp() {
+  const under = [...turns.values()];
+  for (const turn of under) turn.abort.abort();
+  await Promise.allSettled(under.map((turn) => turn.done));
+  process.exit();
+}
+for (const signal of ["SIGHUP", "SIGTERM", "SIGINT"] as const) process.on(signal, hangUp);
+process.stdout.on("error", () => {});
+
 mkdirSync(SESSIONS, { recursive: true, mode: 0o700 });
 for await (const line of createInterface({ input: process.stdin })) {
   const { id, method, params } = JSON.parse(line);
@@ -436,4 +449,4 @@ for await (const line of createInterface({ input: process.stdin })) {
       (error) => reply({ error: { code: Number.isInteger(error.code) ? error.code : -32603, message: error.message } }),
     );
 }
-process.exit(); // the editor hung up
+await hangUp();

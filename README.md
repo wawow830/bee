@@ -64,6 +64,7 @@ through it, and Enter sends the command once only one fits.
 **A session is a file.** `~/.bee/agent/sessions/<id>.jsonl` holds one line per message or setting chosen, written as
 things happen and only ever appended. Its first line is how it began: its working directory, the prompt with the
 `AGENTS.md` files, the tool, and the settings in `settings.json`.
+Closing the editor or the terminal stops a turn as Esc does, so what was said and run until then is written.
 
 **Every request is the file's messages.** So each begins as the last one did, and the provider's cache of it holds. The
 harness reads the file before every step and keeps no other state. For each setting, `{model}`, `{thinking}` or
