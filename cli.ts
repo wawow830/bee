@@ -25,9 +25,9 @@ const first = args
   .trim();
 
 // ── Look ────────────────────────────────────────────────────────────────────
-// Each colour means one thing. Amber is where you type. Words are in the terminal's own colour, code in gray, and
-// red is what failed. All else is dark: marks, hints, and what this terminal says for itself. What bee thinks is as
-// what it says, only faint and italic.
+// Each colour means one thing. Amber is you: the mark before all you say, and where you type. Words are in the
+// terminal's own colour, code in gray, and red is what failed. All else is dark: marks, hints, what is waiting, and
+// what this terminal says for itself. What bee thinks is as what it says, only faint and italic.
 
 const out = process.stdout;
 
@@ -390,7 +390,7 @@ function draw() {
   const turning = spinner[Math.floor(Date.now() / frame) % spinner.length];
   const rows = layout();
   const prompt = [
-    ...queued.map((text) => dark(mark + text.split("\n")[0].slice(0, room()))),
+    ...queued.map((text) => amber(mark) + dark(text.split("\n")[0].slice(0, room()))),
     ...(rows.length || queued.length ? [""] : []),
     amber(busy() ? turning + " " : mark) + input[0],
     ...input.slice(1).map((row) => pad + row),
@@ -449,7 +449,7 @@ function shell({ code, status, output }: Call) {
 /** What you said. */
 function user(text: string) {
   end();
-  add("user", () => wrap(text).map((row, n) => (n ? pad : dark(mark)) + row));
+  add("user", () => wrap(text).map((row, n) => (n ? pad : amber(mark)) + row));
 }
 
 /** What this terminal has to say for itself. */
@@ -610,7 +610,7 @@ function hints(text: string): string[] {
 
 /** Run `/<id> <value>`, as a hint wrote it. */
 async function command(text: string) {
-  note(text);
+  user(text);
   const [, id, value] = text.match(/^\/(\S+) (.*)$/s)!;
   await commands()
     .find((command) => command.id === id)!
