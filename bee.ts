@@ -38,23 +38,71 @@ console.log = console.error; // stdout carries the protocol and nothing else
 /** An error the editor is told of, with its JSON-RPC code. */
 const failure = (code: number, message: string) => Object.assign(new Error(message), { code });
 
+const HOME = process.env.BEE_HOME ?? join(homedir(), ".bee", "agent");
+const read = (path: string, otherwise = "") => (existsSync(path) ? readFileSync(path, "utf8") : otherwise);
+
+// ── Models ──────────────────────────────────────────────────────────────────
+
+/** models.json, as pi writes it: {"providers": {"anthropic": {"baseUrl": "...", "apiKey": "..."}}}. */
+const MODELS = join(HOME, "models.json");
+const models = builtinModels();
+for (const [id, { apiKey, baseUrl }] of Object.entries<any>(JSON.parse(read(MODELS, "{}")).providers ?? {})) {
+  const provider = models.getProvider(id);
+  const resolve = async () => ({ auth: { apiKey, baseUrl }, source: MODELS });
+  if (provider) models.setProvider({ ...provider, auth: { apiKey: { name: MODELS, resolve } } });
+}
+const available = await models.getAvailable();
+const ref = (model: Model<Api>) => `${model.provider}/${model.id}`;
+
 // ── Sessions ────────────────────────────────────────────────────────────────
-// A session is a file of lines, written as things happen: the conversation's
-// messages, and the settings chosen in it. Its id is the file's path, in a
-// folder named for the directory it works in.
+// A session is a file of lines, written as things happen: messages, and the
+// settings chosen. Lines are only appended, so every request begins with the
+// last one, and the provider's cache of it holds. The first line is how the
+// session began: the prompt and the tool, and the settings in settings.json. It
+// is written with the first thing that happens, so a session never used leaves
+// no file. A session's id is its file's path, in a folder for its directory.
 
 type Settings = { model?: string; thinking?: string; cache?: string };
 type Line = Settings & { message?: Message };
 
-const HOME = process.env.BEE_HOME ?? join(homedir(), ".bee", "agent");
 const SESSIONS = join(HOME, "sessions");
 const folder = (cwd: string) => join(SESSIONS, encodeURIComponent(cwd));
 const cwdOf = (sid: string) => decodeURIComponent(basename(dirname(sid)));
 
-/** The lines. A session not yet written has none, and a line that is not JSON is empty. */
-function read(sid: string): Line[] {
+const BASH = {
+  name: "bash",
+  description:
+    "Runs a command in a new bash in the working directory. Returns what it wrote to stdout and stderr, cut to " +
+    "20,000 characters, or the image it wrote.",
+  parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+};
+
+/** AGENTS.md from ~/.bee/agent, then from every directory down to cwd. */
+function instructions(cwd: string) {
+  const dirs = [cwd];
+  while (dirs[0] !== dirname(dirs[0])) dirs.unshift(dirname(dirs[0]));
+  return [HOME, ...dirs]
+    .map((dir) => join(dir, "AGENTS.md"))
+    .filter(existsSync)
+    .map((path) => `<file path="${path}">\n${read(path).trim()}\n</file>`)
+    .join("\n\n");
+}
+
+/** How a session begins. */
+const beginning = (sid: string): Line => ({
+  ...JSON.parse(read(join(HOME, "settings.json"), "{}")),
+  message: {
+    role: "system",
+    content: `You are an agent in the bee harness.\n\n${instructions(cwdOf(sid))}`.trim(),
+    toolsAdded: [BASH],
+    timestamp: Date.now(),
+  },
+});
+
+/** A session's lines. One that is not JSON is empty. */
+function lines(sid: string): Line[] {
   if (dirname(dirname(sid)) !== SESSIONS) throw failure(-32002, `No session ${sid}`);
-  if (!existsSync(sid)) return [];
+  if (!existsSync(sid)) return [beginning(sid)];
   const parse = (json: string) => {
     try {
       return JSON.parse(json) ?? {};
@@ -62,79 +110,46 @@ function read(sid: string): Line[] {
       return {};
     }
   };
-  return readFileSync(sid, "utf8").trimEnd().split("\n").map(parse);
+  return read(sid).trimEnd().split("\n").map(parse);
 }
 
-const append = (sid: string, line: Line) => appendFileSync(sid, JSON.stringify(line) + "\n");
-
-const conversation = (lines: Line[]) => lines.flatMap((line) => (line.message ? [line.message] : []));
-
-// ── The model ───────────────────────────────────────────────────────────────
-
-const BASH = {
-  name: "bash",
-  description:
-    "Runs a command in a new bash in the working directory. Returns what it wrote to stdout and stderr cut to " +
-    "20,000 characters, or the image.",
-  parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
-};
-
-const system = (cwd: string) => `
-You are an agent in the bee harness.
-
-${instructions(cwd)}`.trim();
-
-/** settings.json, as a setting line every session starts with. */
-const SETTINGS = join(HOME, "settings.json");
-const defaults = (): Settings => (existsSync(SETTINGS) ? JSON.parse(readFileSync(SETTINGS, "utf8")) : {});
-
-/** AGENTS.md from ~/.bee/agent, then from every directory down to cwd. */
-function instructions(cwd: string): string {
-  const dirs = [cwd];
-  while (dirs[0] !== dirname(dirs[0])) dirs.unshift(dirname(dirs[0]));
-  return [HOME, ...dirs]
-    .map((dir) => join(dir, "AGENTS.md"))
-    .filter(existsSync)
-    .map((path) => `<file path="${path}">\n${readFileSync(path, "utf8").trim()}\n</file>`)
-    .join("\n\n");
+function append(sid: string, line: Line) {
+  const added = existsSync(sid) ? [line] : [beginning(sid), line];
+  appendFileSync(sid, added.map((one) => JSON.stringify(one) + "\n").join(""));
 }
 
-/** models.json, as pi writes it: {"providers": {"anthropic": {"baseUrl": "...", "apiKey": "..."}}}. */
-const MODELS = join(HOME, "models.json");
-const providers: Record<string, { baseUrl?: string; apiKey?: string }> = existsSync(MODELS)
-  ? JSON.parse(readFileSync(MODELS, "utf8")).providers
-  : {};
-
-const models = builtinModels();
-for (const [id, { apiKey, baseUrl }] of Object.entries(providers)) {
-  const provider = models.getProvider(id);
-  const resolve = async () => ({ auth: { apiKey, baseUrl }, source: MODELS });
-  if (provider) models.setProvider({ ...provider, auth: { apiKey: { name: MODELS, resolve } } });
-}
-const available = await models.getAvailable();
-const ref = (m: Model<Api>) => `${m.provider}/${m.id}`;
+const conversation = (sid: string) => lines(sid).flatMap((line) => (line.message ? [line.message] : []));
 
 /**
- * Settings are lines too, and for each the latest line that makes sense holds. Without one, the model is the first
- * there is a key for, thinking is medium, and the prompt stays cached for five minutes. ("long" is an hour.)
+ * For each setting, the latest line that makes sense holds. Without one, the model is the first there is a key for,
+ * thinking is medium, and the prompt stays cached for five minutes. ("long" is an hour.)
  */
 function settings(sid: string) {
   if (!available.length) throw failure(-32000, "No provider key is set.");
-  const lines = [defaults(), ...read(sid)];
-  const latest = <T>(pick: (line: Line) => T | undefined) => lines.map(pick).findLast(Boolean);
-  const model = latest((line) => available.find((m) => ref(m) === line.model)) ?? available[0];
+  const all = lines(sid);
+  const latest = <T>(pick: (line: Line) => T | undefined) => all.map(pick).findLast(Boolean);
+  const model = latest((line) => available.find((one) => ref(one) === line.model)) ?? available[0];
   const level = latest((line) => MODEL_THINKING_LEVELS.find((level) => level === line.thinking)) ?? "medium";
   const cache = latest((line) => CACHE_RETENTIONS.find((retention) => retention === line.cache)) ?? "short";
   return { model, thinking: clampThinkingLevel(model, level), cache };
 }
 
+// ── The turn ────────────────────────────────────────────────────────────────
+
 /** One reply from the model, streamed to the editor. */
 async function ask(sid: string, signal: AbortSignal): Promise<AssistantMessage> {
   const { model, thinking, cache } = settings(sid);
   const reasoning = thinking === "off" ? undefined : thinking;
-  const request = { signal, sessionId: sid, reasoning, cacheRetention: cache };
-  const context = { systemPrompt: system(cwdOf(sid)), tools: [BASH], messages: conversation(read(sid)) };
-  const stream = models.streamSimple(model, context, request);
+  const stream = models.streamSimple(
+    model,
+    { messages: conversation(sid) },
+    {
+      signal,
+      sessionId: sid,
+      reasoning,
+      cacheRetention: cache,
+    },
+  );
   for await (const event of stream) {
     if (event.type === "text_delta") say(sid, "agent_message", event.delta);
     if (event.type === "thinking_delta") say(sid, "agent_thought", event.delta);
@@ -144,21 +159,15 @@ async function ask(sid: string, signal: AbortSignal): Promise<AssistantMessage> 
   return reply;
 }
 
-/** How full the context is: the tokens in the conversation, as the model counted them in a reply. */
-function usage(sid: string, reply: AssistantMessage) {
-  const { input, output, cacheRead, cacheWrite } = reply.usage;
-  const size = settings(sid).model.contextWindow;
-  update(sid, { sessionUpdate: "usage_update", used: input + output + cacheRead + cacheWrite, size });
-}
-
 const user = (content: UserMessage["content"]): UserMessage => ({ role: "user", content, timestamp: Date.now() });
 
-/** A turn under way: how to stop it, what the user has said that it has not read yet, and how it ends. */
+/** A turn under way: how to stop it, what the user said that it has not read, and how it ends. */
 type Turn = { abort: AbortController; said: UserMessage[]; done?: Promise<string> };
+const turns = new Map<string, Turn>();
 
 /**
- * The loop: read what the user said, ask, run what it asks for, repeat until it has nothing to run and nothing more
- * was said. A prompt sent during a turn joins it, so the model reads it once the commands it is running end.
+ * Read what the user said, ask, run what it asks for, and again until it has nothing to run and nothing more was
+ * said. A prompt sent during a turn joins it, and the model reads it once the commands it is running end.
  */
 async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<string> {
   try {
@@ -177,7 +186,7 @@ async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<str
         return reply.stopReason === "length" ? "max_tokens" : "end_turn";
     }
   } finally {
-    running.delete(sid); // in the same step as the last look at what was said, so nothing said is left behind
+    turns.delete(sid); // in the same step as the last look at what was said, so nothing said is left behind
   }
 }
 
@@ -193,32 +202,31 @@ const IMAGES: Record<string, RegExp> = {
   "image/webp": /^RIFF....WEBP/s,
 };
 
-type Output = { content: ToolResultMessage["content"]; failed: boolean };
-
-/** Run a call's command. Returns what it wrote, as an image or as text cut to its two ends, and whether it failed. */
-async function bash(sid: string, call: ToolCall, signal: AbortSignal): Promise<Output> {
-  const { command } = validateToolCall([BASH], call);
+/** Run a command. Returns what it wrote, as an image or as text cut to its two ends, and whether it failed. */
+async function bash(sid: string, command: string, signal: AbortSignal) {
   // Written to a file, not a pipe, so the call ends when the command does, whatever it left running.
   const path = join(tmpdir(), `bee-${randomUUID()}`);
   const out = openSync(path, "w");
-  const child = spawn("bash", ["-c", command], {
-    cwd: cwdOf(sid),
-    stdio: ["ignore", out, out],
-    detached: true, // its own process group, so an interrupt stops all of it
-  });
+  // In its own process group, so an interrupt stops all of it.
+  const child = spawn("bash", ["-c", command], { cwd: cwdOf(sid), stdio: ["ignore", out, out], detached: true });
   const interrupt = () => process.kill(-child.pid!, "SIGINT");
   signal.addEventListener("abort", interrupt);
   try {
     const [status] = await once(child, "exit");
-    const failed = status !== 0;
     const written = readFileSync(path);
     const start = written.subarray(0, 12).toString("latin1");
     const mimeType = Object.keys(IMAGES).find((type) => IMAGES[type].test(start));
-    if (mimeType) return { content: [{ type: "image", data: written.toString("base64"), mimeType }], failed };
     const text = written.toString("utf8");
     const cut = text.length - SHOWN;
-    const shown = cut <= 0 ? text : `${text.slice(0, SHOWN / 2)}\n[${cut} characters cut]\n${text.slice(-SHOWN / 2)}`;
-    return { content: [{ type: "text", text: shown }], failed };
+    const content: ToolResultMessage["content"] = mimeType
+      ? [{ type: "image", data: written.toString("base64"), mimeType }]
+      : [
+          {
+            type: "text",
+            text: cut <= 0 ? text : `${text.slice(0, SHOWN / 2)}\n[${cut} characters cut]\n${text.slice(-SHOWN / 2)}`,
+          },
+        ];
+    return { content, failed: status !== 0 };
   } finally {
     signal.removeEventListener("abort", interrupt);
     closeSync(out);
@@ -226,11 +234,12 @@ async function bash(sid: string, call: ToolCall, signal: AbortSignal): Promise<O
   }
 }
 
-/** Run one tool call, shown to the editor. Returns its result. */
+/** Run one tool call, shown to the editor. A call that is not a command is told why. */
 async function run(sid: string, call: ToolCall, signal: AbortSignal): Promise<ToolResultMessage> {
   showCall(sid, call);
-  const refused = (error: Error): Output => ({ content: [{ type: "text", text: error.message }], failed: true });
-  const { content, failed } = await bash(sid, call, signal).catch(refused);
+  const { content, failed } = await Promise.resolve()
+    .then(() => bash(sid, validateToolCall([BASH], call).command, signal))
+    .catch((error: Error) => ({ content: [{ type: "text" as const, text: error.message }], failed: true }));
   const result: ToolResultMessage = {
     role: "toolResult",
     toolCallId: call.id,
@@ -253,6 +262,14 @@ const update = (sessionId: string, fields: object) =>
 const say = (sid: string, who: "user_message" | "agent_message" | "agent_thought", words: string) =>
   words && update(sid, { sessionUpdate: `${who}_chunk`, content: { type: "text", text: words } });
 
+/** How full the context is: the tokens in the conversation, as the model counted them in a reply. */
+const usage = (sid: string, reply: AssistantMessage) =>
+  update(sid, {
+    sessionUpdate: "usage_update",
+    used: reply.usage.totalTokens,
+    size: settings(sid).model.contextWindow,
+  });
+
 /** A message's content, as plain text. */
 const plain = (content: string | { type: string; text?: string }[]) =>
   typeof content === "string" ? content : content.map((block) => block.text ?? "").join("");
@@ -263,28 +280,33 @@ function fenced(body: string, language = "") {
   return { type: "content", content: { type: "text", text: `${fence}${language}\n${body.trim()}\n${fence}` } };
 }
 
-const source = (call: ToolCall) => String(call.arguments.command ?? "");
+const command = (call: ToolCall) => String(call.arguments.command ?? "");
 
 function showCall(sid: string, call: ToolCall) {
-  const title = source(call).trim().split("\n")[0].slice(0, 80);
-  const content = [fenced(source(call), "bash")];
-  const shown = { toolCallId: call.id, title, kind: "execute", status: "in_progress", content };
-  update(sid, { sessionUpdate: "tool_call", ...shown, rawInput: call.arguments });
+  const shown = { toolCallId: call.id, title: command(call).trim().split("\n")[0].slice(0, 80), kind: "execute" };
+  const content = [fenced(command(call), "bash")];
+  update(sid, { sessionUpdate: "tool_call", ...shown, status: "in_progress", content, rawInput: call.arguments });
 }
 
 function showResult(sid: string, call: ToolCall, result: ToolResultMessage) {
   const status = result.isError ? "failed" : "completed";
-  const output = plain(result.content).trim();
-  const shown = result.content.filter((block) => block.type === "image" || block.text.trim());
-  const blocks = shown.map((block) => (block.type === "image" ? { type: "content", content: block } : fenced(block.text)));
-  const content = [fenced(source(call), "bash"), ...blocks];
-  update(sid, { sessionUpdate: "tool_call_update", toolCallId: call.id, status, content, rawOutput: output });
+  const output = result.content.map((block) =>
+    block.type === "image" ? { type: "content", content: block } : fenced(block.text),
+  );
+  const content = [fenced(command(call), "bash"), ...output];
+  update(sid, {
+    sessionUpdate: "tool_call_update",
+    toolCallId: call.id,
+    status,
+    content,
+    rawOutput: plain(result.content),
+  });
 }
 
 /** Show the editor a conversation it has not seen. */
 function replay(sid: string) {
   const calls = new Map<string, ToolCall>();
-  for (const message of conversation(read(sid))) {
+  for (const message of conversation(sid)) {
     if (message.role === "user") say(sid, "user_message", plain(message.content));
     if (message.role === "toolResult") showResult(sid, calls.get(message.toolCallId)!, message);
     if (message.role !== "assistant") continue;
@@ -302,7 +324,7 @@ function replay(sid: string) {
 /** The settings the editor can change. Each one's id is its key in a line. */
 function options(sid: string) {
   const { model, thinking } = settings(sid);
-  const all = available.map((m) => ({ value: ref(m), name: m.name }));
+  const all = available.map((one) => ({ value: ref(one), name: one.name }));
   const levels = getSupportedThinkingLevels(model).map((level) => ({ value: level, name: level }));
   return [
     { id: "model", name: "Model", category: "model", currentValue: ref(model), options: all },
@@ -313,15 +335,15 @@ function options(sid: string) {
 /** The sessions, latest first. One's title is the start of what the user first said in it. */
 function list(cwd?: string) {
   const folders = cwd ? [folder(cwd)] : readdirSync(SESSIONS).map((name) => join(SESSIONS, name));
-  const sessions = folders
+  return folders
     .filter(existsSync)
     .flatMap((dir) => readdirSync(dir).map((name) => join(dir, name)))
     .map((sessionId) => {
-      const first = conversation(read(sessionId)).find((message) => message.role === "user")?.content ?? "";
+      const first = conversation(sessionId).find((message) => message.role === "user")?.content ?? "";
       const updatedAt = statSync(sessionId).mtime.toISOString();
       return { sessionId, cwd: cwdOf(sessionId), title: plain(first).slice(0, 80) || undefined, updatedAt };
-    });
-  return sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    })
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 /** Prompt blocks from the editor, as content for the model. */
@@ -334,11 +356,9 @@ const parts = (blocks: any[]): UserMessage["content"] =>
         : { type: "text", text: block.text ?? block.uri ?? "" },
   );
 
-const running = new Map<string, Turn>();
-
 /** A session the editor opens, and how full its context was at the last reply. */
 function open(sessionId: string) {
-  const last = conversation(read(sessionId)).findLast((message) => message.role === "assistant");
+  const last = conversation(sessionId).findLast((message) => message.role === "assistant");
   if (last) usage(sessionId, last);
   return { sessionId, configOptions: options(sessionId) };
 }
@@ -370,14 +390,14 @@ const handlers: Record<string, (params: any) => unknown> = {
     append(sessionId, { [configId]: value });
     return { configOptions: options(sessionId) };
   },
-  "session/cancel": ({ sessionId }) => running.get(sessionId)?.abort.abort(),
+  "session/cancel": ({ sessionId }) => turns.get(sessionId)?.abort.abort(),
   "session/prompt": async ({ sessionId, prompt }) => {
     const message = user(parts(prompt));
-    let under = running.get(sessionId);
+    let under = turns.get(sessionId);
     if (under) under.said.push(message);
     else {
       under = { abort: new AbortController(), said: [message] };
-      running.set(sessionId, under);
+      turns.set(sessionId, under);
       under.done = turn(sessionId, under);
     }
     return { stopReason: await under.done };

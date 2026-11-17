@@ -27,7 +27,8 @@ knows, such as `ANTHROPIC_API_KEY`, works too.
 | --- | --- |
 | `BEE_HOME` | Where bee keeps its files. Without it, `~/.bee/agent` |
 
-Defaults go in `~/.bee/agent/settings.json`, as a setting line. Without it, the first model with a key, `medium`, and a five-minute cache:
+Defaults go in `~/.bee/agent/settings.json`, and a session begins with them. Without it, the first model with a key,
+`medium`, and a five-minute cache:
 
 ```json
 { "model": "anthropic/claude-opus-4-5", "thinking": "high", "cache": "long" }
@@ -55,25 +56,24 @@ through it, and Enter takes the first once only one fits.
 
 ## How it works
 
-**A session is a file.** `~/.bee/agent/sessions/<working directory, URL-encoded>/<id>.jsonl` holds the conversation's
-messages and the settings chosen in it, `{model}`, `{thinking}` or `{cache}`, one per line, written as things happen.
-Its path is the session's id, and its first line is written with the first thing that happens in it, so a session never
-used leaves no file. The harness reads the file before every step and keeps no other state.
+**A session is a file.** `~/.bee/agent/sessions/<working directory, URL-encoded>/<id>.jsonl`, and its path is its id. It
+holds one line per message or setting chosen, written as things happen and only ever appended. Its first line is how it
+began: the prompt, with the `AGENTS.md` files, the tool, and the settings in `settings.json`. That line is written with
+the first thing that happens, so a session never used leaves no file.
 
-**The harness supplies itself.** Each request is the session's messages, with the prompt and the tool as they are now.
-The latest setting holds, and `settings.json` counts as the first line of every session.
+**Every request is the file's messages.** So each begins as the last one did, and the provider's cache of it holds. The
+harness reads the file before every step and keeps no other state. For each setting, `{model}`, `{thinking}` or
+`{cache}`, the latest line holds.
 
 **One tool.** `bash` runs a command in a new bash, in the working directory. Its result is whatever the command wrote,
-cut to 20,000 characters. If what it wrote is an image, the model sees the image. The computer is what lasts: files,
-and whatever the command left running.
+cut to 20,000 characters. If what it wrote is an image, the model sees the image. The computer is what lasts: files, and
+whatever the command left running.
 
-**The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model
-what to do. Instructions are yours, in `AGENTS.md`.
+**The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model what
+to do. Instructions are yours, in `AGENTS.md`, from `~/.bee/agent` and every directory from the root down to the working
+directory.
 
 **The file forgives.** A line that is not JSON is skipped. A setting whose value means nothing is skipped, and the one
 before it holds.
-
-**Instructions** come from `AGENTS.md` in `~/.bee/agent` and in every directory from the root down to the working
-directory. They are read for every request.
 
 Left out: permission prompts, sub-agents, memory, plan mode, compaction, MCP.
