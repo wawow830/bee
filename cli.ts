@@ -49,6 +49,7 @@ const mark = "› "; // what you say begins with it
 const spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"; // the mark, while bee works
 const frame = 80; // how many milliseconds each turn of the spinner shows
 const choices = 8; // how many hints are shown
+const scrolled = 3; // how many rows a turn of the wheel scrolls
 
 /** How wide a row can be after `indent` columns. The last column stays free. */
 const room = (indent = pad.length) => out.columns - 1 - indent;
@@ -64,8 +65,7 @@ const wrap = (text: string, size = room()) => fill(text, size).map((row) => row.
 
 // ── Markdown ────────────────────────────────────────────────────────────────
 // A reply is shown as it looks. It is read as blocks: a line of prose, code between fences, or a table. Blank lines
-// between blocks are one blank row, and there are none before or after them. While a reply arrives, a row is final
-// once nothing more of it can change the row. Those are printed, and the rest wait below them.
+// between blocks are one blank row, and there are none before or after them.
 
 // A look is which of these hold: bold, code, thought.
 const [strong, mono, thought] = [1, 2, 4];
@@ -80,11 +80,8 @@ const looks =
     return text;
   };
 
-/** Text with its marks taken out, the look of each character, and where in it a mark not yet closed is. */
-type Marked = { text: string; each: number[]; open: number };
-
-/** Rows, and how many of them are final. */
-type Rendered = { rows: string[]; final: number };
+/** Text with its marks taken out, and the look of each character. */
+type Marked = { text: string; each: number[] };
 
 /** How many columns `row` takes on screen. */
 const width = (row: string) => row.replace(/\x1b\[[\d;]*m/g, "").length;
@@ -110,10 +107,9 @@ function unpaired(parts: string[]) {
 function marked(text: string, whole: boolean, look = 0): Marked {
   const parts = tokens(text);
   const unclosed = unpaired(parts);
-  const result: Marked = { text: "", each: [], open: Infinity };
+  const result: Marked = { text: "", each: [] };
   parts.forEach((part, n) => {
     const plain = unclosed.has(n) && whole; // this mark is only characters
-    if (unclosed.has(n)) result.open = Math.min(result.open, result.text.length);
     if (part === "`" && !plain) look ^= mono;
     else if (part === "**" && !(look & mono) && !plain) look ^= strong;
     else for (const character of part) ((result.text += character), result.each.push(look));
@@ -121,11 +117,10 @@ function marked(text: string, whole: boolean, look = 0): Marked {
   return result;
 }
 
-/** Marked text as rows no wider than `size`, each part of a row in its look. Those before a mark not yet closed are final. */
-function paint({ text, each, open }: Marked, size: number): Rendered {
+/** Marked text as rows no wider than `size`, each part of a row in its look. */
+function paint({ text, each }: Marked, size: number) {
   let from = 0; // where in `text` the row begins
-  let final = 0;
-  const rows = fill(text, size).map((row) => {
+  return fill(text, size).map((row) => {
     const kept = row.trimEnd();
     let painted = "";
     for (let start = 0, end = 1; start < kept.length; end++) {
@@ -134,17 +129,9 @@ function paint({ text, each, open }: Marked, size: number): Rendered {
       start = end;
     }
     from += row.length;
-    if (from <= open) final++;
     return painted;
   });
-  return { rows, final };
 }
-
-/** Rows of a block, of which `final` are final, or all once it is `done`. */
-const settle = (rows: string[], done: boolean, final: number): Rendered => ({
-  rows,
-  final: done ? rows.length : final,
-});
 
 /** Rows after `lead`: the first begins with it, and the rest under where the first's text begins. */
 const hang = (lead: string, rows: string[]) => rows.map((row, n) => (n ? " ".repeat(width(lead)) : lead) + row);
@@ -154,11 +141,8 @@ function prose(line: string, done: boolean, look: number) {
   const heading = line.match(/^#{1,6}\s+(.*)/);
   const [, indent = "", item = "", body = line] = heading ? [] : (line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)/) ?? []);
   const lead = item && indent + (/\d/.test(item) ? item : "•") + " ";
-  const { rows, final } = paint(
-    marked(heading?.[1] ?? body, done, heading ? look | strong : look),
-    room(pad.length + lead.length),
-  );
-  return settle(hang(looks(look)(dark(lead)), rows), done, Math.min(final, rows.length - 1)); // the last row may yet grow
+  const rows = paint(marked(heading?.[1] ?? body, done, heading ? look | strong : look), room(pad.length + lead.length));
+  return hang(looks(look)(dark(lead)), rows);
 }
 
 /** A line of code, as it is. Its rows hang under where its text begins. */
@@ -210,7 +194,7 @@ function table(lines: string[], whole: boolean, look: number) {
     return " ".repeat(before) + row + " ".repeat(space - before);
   };
   return text.flatMap((row, r) => {
-    const painted = row.map((cell, n) => paint(cell, widths[n]).rows);
+    const painted = row.map((cell, n) => paint(cell, widths[n]));
     const height = Math.max(...painted.map((each) => each.length));
     const shown = [...Array(height).keys()].map((m) => columns.map((n) => place(painted[n][m] ?? "", n)).join(gap));
     const under = headed && !r ? [looks(look)(dark(widths.map((each) => "─".repeat(each)).join(gap)))] : [];
@@ -252,52 +236,53 @@ function* blocks(reply: string, whole: boolean): Generator<Block> {
   }
 }
 
-/** Code between fences. Until it is `done`, the rows of the line being written are not final: it may yet be a fence. */
-function code([, ...lines]: string[], done: boolean, look: number) {
-  const closed = fence(lines.at(-1) ?? "");
-  const body = closed ? lines.slice(0, -1) : lines;
-  const paint = looks(look | mono);
-  const rows = body.flatMap((line) => source(line, paint));
-  return settle(rows, done, rows.length - (closed || !body.length ? 0 : source(body.at(-1)!, paint).length));
+/** Code between fences. */
+function code([, ...lines]: string[], look: number) {
+  const body = fence(lines.at(-1) ?? "") ? lines.slice(0, -1) : lines;
+  return body.flatMap((line) => source(line, looks(look | mono)));
 }
 
-/** How each kind of block is shown. A table's rows are final only once it is done, as each may change its widths. */
-const shows: Record<Kind, (lines: string[], done: boolean, look: number) => Rendered> = {
+/** How each kind of block is shown. */
+const shows: Record<Kind, (lines: string[], done: boolean, look: number) => string[]> = {
   prose: ([line], done, look) => prose(line, done, look),
-  code,
-  table: (lines, done, look) => settle(table(lines, done, look), done, 0),
+  code: (lines, done, look) => code(lines, look),
+  table,
 };
 
 /** How bee says something: the look of its words, and whether its blocks are set apart by blank lines. */
 type Voice = { look: number; apart: boolean };
 
-/** A reply, or a thought, as rows in its voice, and how many are final: those nothing to come can change. */
-function render(text: string, whole: boolean, voice: Voice): Rendered {
+/** A reply, or a thought, as rows in its voice. */
+function render(text: string, whole: boolean, voice: Voice) {
   const rows: string[] = [];
-  let final = 0;
   for (const { kind, lines, apart, done } of blocks(text, whole)) {
-    const { rows: shown, final: settled } = shows[kind](lines, done, voice.look);
-    if (!shown.length) continue;
-    const before = apart && voice.apart && rows.length ? [""] : [];
-    if (settled) final = rows.length + before.length + settled;
-    rows.push(...before, ...shown);
+    const shown = shows[kind](lines, done, voice.look);
+    if (shown.length && apart && voice.apart && rows.length) rows.push("");
+    rows.push(...shown);
   }
-  return { rows, final };
+  return rows;
 }
 
 // ── Screen ──────────────────────────────────────────────────────────────────
-// The transcript is everything said, each thing shown at the screen's width. Its final rows are printed once, and
-// below them the rest is redrawn: what may yet change, what bee is running, what you have queued, and the prompt.
-// Bee's work, what it thinks and the code it runs with what the code printed, is shown all or not at all: Ctrl-O turns
-// from one to the other. When that or the screen's width changes, all of the transcript is shown again.
+// The screen is bee's own: the transcript, and under it what you have queued and the prompt. The transcript is turns,
+// each what you said and what came of it. A turn shows its answer, the last thing bee said in it, and folds away the
+// work before it: what bee thought and ran, and what it said on the way. Clicking the answer unfolds the work, and
+// clicking a command shows what it printed. A turn with no answer, as one under way has not, has nothing to fold to,
+// and its work is shown. The wheel scrolls, and at the bottom the transcript follows what comes.
 
 type Option = { id: string; currentValue: string; options: { value: string }[] };
 
 /** Who said a thing shown, or what it is. */
 type Said = "user" | "thought" | "reply" | "tool" | "note";
 
-/** A thing in the transcript, as rows at the screen's width. */
-type Entry = { said: Said; render: () => Rendered };
+/** A thing in the transcript: its rows at the screen's width, and whether it is open. */
+type Entry = { said: Said; rows: () => string[]; open: boolean };
+
+/** A row on screen, and what clicking it does. */
+type Row = { text: string; click?: () => void };
+
+/** A command bee ran: its code, how it ended, and what it printed. */
+type Call = { code: string; status: string; output: string };
 
 let typed = ""; // the prompt
 let cursor = 0; // where the cursor is in it
@@ -306,49 +291,71 @@ let writing: { said: "thought" | "reply"; text: string; whole: boolean } | undef
 let usage = ""; // how full its context is
 let options: Option[] = []; // the session's settings
 let prompts = 0; // how many bee has not answered: a turn is under way while there are any
-let printed = 0; // how many rows of the transcript are printed
-let at = 0; // how many rows the cursor is below the top of what is redrawn
+let top: number | undefined; // the first row of the transcript on screen, once you have scrolled; else it follows
+let at = 0; // the first row of the transcript on screen
+let shown: Row[] = []; // the rows of the transcript on screen
 const transcript: Entry[] = [];
-let work = false; // whether bee's work is shown
-const running = new Map<string, string>(); // the code of the calls bee is waiting on
+const ran = new Map<string, Call>(); // what bee ran, by the id of its call
 const queued: string[] = []; // waiting for the turn to end
 const history: string[] = []; // what you have said, here and in the sessions opened, for Up to recall
 
 const busy = () => prompts > 0;
-const up = (rows: number) => (rows ? `\x1b[${rows}A` : "");
-const clear = () => "\r" + up(at) + "\x1b[J";
 
-/** Rows, all of them final. */
-const final = (rows: string[]): Rendered => ({ rows, final: rows.length });
-
-/** Add to the transcript. Its rows are made again only when the screen's width, or `version`, changes. */
-function add(said: Said, make: () => Rendered, version = () => "") {
-  let made: { at: string; rendered: Rendered } | undefined;
-  const render = () => {
-    const at = `${out.columns} ${version()}`;
-    if (made?.at !== at) made = { at, rendered: make() };
-    return made.rendered;
+/** Add to the transcript. Its rows are made again only when the screen's width, whether it is open, or `version` changes. */
+function add(said: Said, make: (open: boolean) => string[], version = () => "") {
+  let made: { at: string; rows: string[] } | undefined;
+  const entry: Entry = {
+    said,
+    open: false,
+    rows: () => {
+      const at = `${out.columns} ${entry.open} ${version()}`;
+      if (made?.at !== at) made = { at, rows: make(entry.open) };
+      return made.rows;
+    },
   };
-  transcript.push({ said, render });
+  transcript.push(entry);
   draw();
 }
 
-/** Whether a thing is bee at work: thinking, or running code. */
-const working = (said: Said) => said === "thought" || said === "tool";
+/** Open what is shut, or shut what is open. What is above it stays where it is on screen. */
+function toggle(entry: Entry) {
+  top = at;
+  entry.open = !entry.open;
+}
+
+/** The transcript in turns. Each begins with what you said, or with what this terminal said. */
+function turns() {
+  const all: Entry[][] = [];
+  for (const entry of transcript) {
+    if (!all.length || entry.said === "user" || entry.said === "note") all.push([]);
+    all.at(-1)!.push(entry);
+  }
+  return all;
+}
 
 /**
- * Things said as rows: of each, its final rows, or all of them. Bee's work is left out unless it is shown. Each thing is
- * set apart from the one before by a blank row, unless both are bee at work.
+ * The transcript as rows. A turn's answer is the last thing in it, once the turn is over, if bee said it. Its work, all
+ * between what began the turn and the answer, is shown once the answer is open. Each part of a turn is set apart from
+ * the one before by a blank row, and so is each turn.
  */
-function layout(entries: { said: Said; rows: string[] }[]) {
-  const rows: string[] = [];
-  let last: Said | undefined;
-  for (const { said, rows: own } of entries) {
-    if (!own.length || (working(said) && !work)) continue;
-    if (last && !(working(said) && working(last))) rows.push("");
-    rows.push(...own);
-    last = said;
-  }
+function layout() {
+  const rows: Row[] = [];
+  const all = turns();
+  all.forEach((turn, n) => {
+    const head = turn[0].said === "user" || turn[0].said === "note" ? 1 : 0;
+    const answer = turn.at(-1)!;
+    const answered = answer.said === "reply" && !(busy() && n === all.length - 1);
+    const work = turn.slice(head, answered ? -1 : undefined);
+    const parts = [turn.slice(0, head), answered && !answer.open ? [] : work, answered ? [answer] : []];
+    for (const part of parts) {
+      const own = part.flatMap((entry) => {
+        const opens = entry.said === "tool" || (entry === answer && answered && work.length > 0);
+        return entry.rows().map((text) => ({ text, click: opens ? () => toggle(entry) : undefined }));
+      });
+      if (own.length && rows.length) rows.push({ text: "" });
+      rows.push(...own);
+    }
+  });
   return rows;
 }
 
@@ -358,99 +365,88 @@ function current(id: string) {
   return options.find((option) => option.id === id)?.currentValue ?? "";
 }
 
-/** Print what of the transcript is final and not printed yet, and redraw the rest. */
+/** Draw the screen: as much of the transcript as fits, and under it what is queued and the prompt. */
 function draw() {
-  const rendered = transcript.map(({ said, render }) => ({ said, ...render() }));
-  const settled = layout(rendered.map(({ said, rows, final }) => ({ said, rows: rows.slice(0, final) })));
-  const code = [...running.values()].map((text) => ({ said: "tool" as const, rows: ran(text, "", gray) }));
-  const pending = layout([...rendered, ...code]).slice(settled.length);
-  const finished = settled.slice(printed);
-  printed = settled.length;
-
   const size = room();
   const chop = (text: string) => cut(text, `.{1,${size}}`);
   const input = chop(typed);
   const before = chop(typed.slice(0, cursor)); // the cursor is at the end of these rows
   const fits = hints(tabbed || typed);
   const last = Math.max(choices, fits.indexOf(typed) + 1); // the hints shown end at the one Tab is on
-  const shown = fits.slice(last - choices, last);
+  const listed = fits.slice(last - choices, last);
   const from = (tabbed || typed).match(/^\/\S*\s+/)?.[0].length ?? 0; // each hint is shown from where it differs
-  const more = fits.length - shown.length;
-  const widest = Math.max(...shown.map((hint) => hint.trimEnd().length));
-  const below = input.length - before.length + shown.length + (more ? 1 : 0);
+  const more = fits.length - listed.length;
+  const widest = Math.max(...listed.map((hint) => hint.trimEnd().length));
+  const below = input.length - before.length + listed.length + (more ? 1 : 0);
   const turning = spinner[Math.floor(Date.now() / frame) % spinner.length];
-  // What is redrawn must fit the screen, or what of it went above the screen could not be erased.
-  const redrawn = [
-    ...pending,
+  const rows = layout();
+  const prompt = [
     ...queued.map((text) => dark(mark + text.split("\n")[0].slice(0, room()))),
-    "",
+    ...(rows.length || queued.length ? [""] : []),
     amber(busy() ? turning + " " : mark) + input[0],
     ...input.slice(1).map((row) => pad + row),
-    ...shown.map((hint) => {
+    ...listed.map((hint) => {
       const named = hint.match(/^\/(\S+) $/)?.[1]; // a command, which is shown with what it is set to
       const text = (named ? hint.trimEnd().padEnd(widest) + pad + current(named) : hint).slice(from, room()).trimEnd();
       return pad + " ".repeat(from) + (hint === typed ? text : dark(text)); // the one Tab is on is in the prompt
     }),
     ...(more ? [pad + " ".repeat(from) + dark(`${more} more`)] : []),
-  ].slice(-(out.rows - 1));
-  // One frame: erase what was drawn, draw, and put the cursor where it is in the prompt.
+  ];
+  const height = Math.max(0, out.rows - prompt.length);
+  const end = Math.max(0, rows.length - height); // the first row on screen, at the bottom
+  if (top !== undefined && top >= end) top = undefined;
+  at = top ?? end;
+  shown = rows.slice(at, at + height);
+  const screen = [...shown.map((row) => row.text), ...prompt].slice(-out.rows);
+  // One frame: each row drawn over the one before, and the cursor put where it is in the prompt.
   const column = pad.length + before.at(-1)!.length + 1;
-  out.write(`\x1b[?2026h${clear()}${[...finished, ...redrawn].join("\n")}${up(below)}\x1b[${column}G\x1b[?2026l`);
-  at = redrawn.length - below - 1;
+  const drawn = screen.map((row) => row + "\x1b[K").join("\r\n");
+  out.write(`\x1b[?2026h\x1b[H${drawn}\x1b[J\x1b[${screen.length - below};${column}H\x1b[?2026l`);
 }
 
-/** Show all of the transcript again, as it is shown now: at another width, or with or without bee's work, it was not. */
-function reflow() {
-  out.write("\x1b[H\x1b[2J\x1b[3J"); // the screen, and what scrolled off it, cleared
-  [printed, at] = [0, 0];
-  draw();
-}
-
-/** Bee's voices. A thought is faint, and its paragraphs run together, as it is bee at work. */
+/** Bee's voices. A thought is faint, and its paragraphs run together. */
 const voices: Record<"thought" | "reply", Voice> = {
   thought: { look: thought, apart: false },
   reply: { look: 0, apart: true },
 };
 
-/** A thought or a reply arrives in pieces. Its rows are printed once they are final. */
+/** A thought or a reply arrives in pieces. */
 function stream(said: "thought" | "reply", text: string) {
   if (writing?.said !== said) {
     end();
     const own = (writing = { said, text: "", whole: false });
-    const make = () => {
-      const { rows, final } = render(own.text, own.whole, voices[said]);
-      return { rows: rows.map((row) => row && pad + row), final };
-    };
+    const make = () => render(own.text, own.whole, voices[said]).map((row) => row && pad + row);
     add(said, make, () => `${own.text.length} ${own.whole}`);
   }
   writing.text += text;
   draw();
 }
 
-/** The thought or reply is over, if there was one: all of it is final. */
+/** The thought or reply is over, if there was one. */
 function end() {
   if (writing) writing.whole = true;
   writing = undefined;
   draw();
 }
 
-/** Code bee ran, and under it what it printed. */
-function ran(code: string, output: string, look: Paint) {
+/** Code bee ran, and under it, once it is open, what the code printed. */
+function shell({ code, status, output }: Call, open: boolean) {
   const lines = (text: string, paint: Paint, indent = "") =>
     text.split("\n").flatMap((line) => source(indent + line, paint));
-  return [...lines(code.trim(), look), ...lines(output.trimEnd(), dark, pad)].map((row) => row && pad + row);
+  const printed = open && output.trim() ? lines(output.trimEnd(), dark, pad) : [];
+  return [...lines(code.trim(), status === "failed" ? red : gray), ...printed].map((row) => row && pad + row);
 }
 
 /** What you said. */
 function user(text: string) {
   end();
-  add("user", () => final(wrap(text).map((row, n) => (n ? pad : dark(mark)) + row)));
+  add("user", () => wrap(text).map((row, n) => (n ? pad : dark(mark)) + row));
 }
 
 /** What this terminal has to say for itself. */
 function note(text: string, look = dark) {
   end();
-  add("note", () => final(wrap(text).map((row) => pad + look(row))));
+  add("note", () => wrap(text).map((row) => pad + look(row)));
 }
 
 // ── bee ─────────────────────────────────────────────────────────────────────
@@ -476,14 +472,15 @@ const updates: Record<string, (update: Update) => void> = {
   agent_message_chunk: ({ content }) => stream("reply", content.text),
   tool_call: ({ toolCallId, rawInput }) => {
     end();
-    running.set(toolCallId, rawInput.command);
-    draw();
+    const call: Call = { code: rawInput.command ?? "", status: "", output: "" };
+    ran.set(toolCallId, call);
+    add("tool", (open) => shell(call, open), () => call.status);
   },
   tool_call_update: ({ toolCallId, status, rawOutput }) => {
-    if (status !== "completed" && status !== "failed") return;
-    const code = running.get(toolCallId) ?? "";
-    running.delete(toolCallId);
-    add("tool", () => final(ran(code, rawOutput ?? "", status === "failed" ? red : gray)));
+    const call = ran.get(toolCallId);
+    if (!call || (status !== "completed" && status !== "failed")) return;
+    Object.assign(call, { status, output: rawOutput ?? "" });
+    draw();
   },
   usage_update: ({ used, size }) => {
     usage = `${Math.ceil((100 * used) / size)}%`;
@@ -517,7 +514,7 @@ bee.on("exit", (status) => quit(status ?? 1));
 
 /** Leave the terminal as it was found. */
 function quit(status = 0, message = ""): never {
-  out.write(clear() + "\x1b[?2004l" + message);
+  out.write("\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?1049l" + message); // as it was when bee began
   process.exit(status);
 }
 
@@ -646,6 +643,7 @@ function enter(wait = false) {
   if (!text) return;
   history.push(text);
   back = 0;
+  top = undefined; // the transcript follows again
   splice(0, typed.length);
   if (wait || hint || !busy()) return queue(hint ?? text);
   prompt(text).catch((error) => note(error.message, red));
@@ -670,16 +668,24 @@ const keys: Record<string, () => unknown> = {
   "\x1b[C": () => move(cursor + 1), // Right
   "\x1b[A": () => recall(1), // Up
   "\x1b[B": () => recall(-1), // Down
-  "\x0f": () => ((work = !work), reflow()), // Ctrl-O: bee's work, shown or not
   "\x1b": () => busy() && stop(), // Esc
   "\x03": () => (typed ? splice(0, typed.length) : busy() ? stop() : quit()), // Ctrl-C: clears, else stops, else quits
 };
 
-/** Take what the terminal sends, a key at a time. */
+/** What a press of the mouse does, by its button, at a row on screen. */
+const buttons: Record<number, (row: number) => unknown> = {
+  0: (row) => shown[row - 1]?.click?.(), // the left button: what the row does
+  64: () => (top = Math.max(0, at - scrolled)), // the wheel, up
+  65: () => (top = at + scrolled), // the wheel, down
+};
+
+/** Take what the terminal sends, a key or a press of the mouse at a time. */
 function press(data: string) {
-  for (const [key] of data.matchAll(/\x1b\[[\d;]*[^\d;]|\x1b[^]|[^]/g)) {
+  for (const [key] of data.matchAll(/\x1b\[<[\d;]*[Mm]|\x1b\[[\d;]*[^\d;]|\x1b[^]|[^]/g)) {
     if (key !== "\t") tabbed = "";
-    if (/^\x1b\[20[01]~$/.test(key)) pasting = key === "\x1b[200~";
+    const mouse = key.match(/^\x1b\[<(\d+);\d+;(\d+)([Mm])$/);
+    if (mouse) mouse[3] === "M" && buttons[+mouse[1]]?.(+mouse[2]);
+    else if (/^\x1b\[20[01]~$/.test(key)) pasting = key === "\x1b[200~";
     else if (pasting) splice(cursor, cursor, key === "\r" ? "\n" : key);
     else if (keys[key]) keys[key]();
     else if (key >= " ") splice(cursor, cursor, key);
@@ -689,14 +695,15 @@ function press(data: string) {
 
 // ── Start ───────────────────────────────────────────────────────────────────
 
+// A screen of bee's own, the marks a terminal puts around a paste, and where the mouse is pressed.
+out.write("\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h");
 const fatal = (error: Error) => quit(1, error.message + "\n");
 await call("initialize", { protocolVersion: 1, clientCapabilities: {} }).catch(fatal);
 const latest = resume ? (await sessions().catch(fatal)).find((session) => session.title) : undefined;
 await open(latest?.sessionId).catch(fatal);
 
 process.stdin.setRawMode(true).setEncoding("utf8").on("data", press);
-out.write("\x1b[?2004h"); // ask for the marks around a paste
-out.on("resize", reflow);
+out.on("resize", draw);
 setInterval(() => busy() && draw(), frame); // the mark turns while bee works
 
 if (first) queue(first);
