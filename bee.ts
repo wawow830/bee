@@ -114,6 +114,7 @@ function lines(sid: string): Line[] {
 }
 
 function append(sid: string, line: Line) {
+  mkdirSync(dirname(sid), { recursive: true, mode: 0o700 });
   const added = existsSync(sid) ? [line] : [beginning(sid), line];
   appendFileSync(sid, added.map((one) => JSON.stringify(one) + "\n").join(""));
 }
@@ -374,10 +375,7 @@ const handlers: Record<string, (params: any) => unknown> = {
       sessionCapabilities: { list: {}, resume: {} },
     },
   }),
-  "session/new": ({ cwd }) => {
-    mkdirSync(folder(cwd), { recursive: true, mode: 0o700 });
-    return open(join(folder(cwd), randomUUID() + ".jsonl"));
-  },
+  "session/new": ({ cwd }) => open(join(folder(cwd), randomUUID() + ".jsonl")),
   "session/resume": ({ sessionId }) => open(sessionId),
   "session/load": ({ sessionId }) => {
     replay(sessionId);
