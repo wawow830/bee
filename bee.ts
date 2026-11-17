@@ -223,12 +223,11 @@ async function bash(sid: string, command: string, signal: AbortSignal) {
   const interrupt = () => process.kill(-child.pid!, "SIGINT");
   signal.addEventListener("abort", interrupt);
   try {
-    const [status, killed] = await once(child, "exit");
+    const [status] = await once(child, "exit");
     const written = readFileSync(path);
     const start = written.subarray(0, 12).toString("latin1");
     const mimeType = Object.keys(IMAGES).find((type) => IMAGES[type].test(start));
-    // Never empty: a provider refuses a failed result with nothing in it.
-    const text = written.toString("utf8") || `[no output, ${killed ?? `exit status ${status}`}]`;
+    const text = written.toString("utf8") || "(no output)";
     const cut = text.length - SHOWN;
     const content: ToolResultMessage["content"] = mimeType
       ? [{ type: "image", data: written.toString("base64"), mimeType }]
@@ -251,10 +250,7 @@ async function run(sid: string, call: ToolCall, signal: AbortSignal): Promise<To
   showCall(sid, call);
   const { content, failed } = await Promise.resolve()
     .then(() => bash(sid, validateToolCall([BASH], call).command, signal))
-    .catch((error: Error) => ({
-      content: [{ type: "text" as const, text: error.message || String(error) }],
-      failed: true,
-    }));
+    .catch((error: Error) => ({ content: [{ type: "text" as const, text: error.message }], failed: true }));
   const result: ToolResultMessage = {
     role: "toolResult",
     toolCallId: call.id,
