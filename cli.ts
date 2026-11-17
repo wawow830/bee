@@ -30,16 +30,13 @@ type Paint = (text: string) => string;
 // Colours by value, not by number: a theme can make any number another colour.
 const color = (rgb: number): Paint => (text) =>
   `\x1b[38;2;${rgb >> 16};${(rgb >> 8) & 255};${rgb & 255}m${text}\x1b[39m`;
-const [amber, light, gray, dark, red] = [0xffaf00, 0xbcbcbc, 0x8a8a8a, 0x4e4e4e, 0xff5f5f].map(color);
+const [amber, gray, dark, red] = [0xffaf00, 0x8a8a8a, 0x4e4e4e, 0xff5f5f].map(color);
 const bold: Paint = (text) => `\x1b[1m${text}\x1b[22m`;
-const italic: Paint = (text) => `\x1b[3m${text}\x1b[23m`;
 
 const pad = "  "; // every row begins with it, or with a mark as wide
-const mark = amber("› "); // what you say begins with it
-const bar = "│ "; // what bee runs, and what it printed, are behind it
+const mark = dark("› "); // what you said begins with it
 const spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"; // the mark, while bee works
 const frame = 80; // how many milliseconds each turn of the spinner shows
-const tail = 4; // how many rows of code, and of what it printed, are shown
 const choices = 8; // how many hints are shown
 
 /** How wide a row can be after `indent` columns. The last column stays free. */
@@ -60,18 +57,16 @@ const markdown: Paint = (row) =>
     .replace(/\*\*(.+?)\*\*/g, (_, text) => bold(text))
     .replace(/`([^`]+)`/g, (_, text) => amber(text));
 
-/** Code and what it printed, each cut to its last rows, behind a bar. */
-function tool(code: string, output = "", tint = gray) {
-  const last = (text: string, look: Paint) => {
-    const rows = wrap(text, room(pad.length + bar.length));
-    return (rows.length > tail ? ["⋯", ...rows.slice(-tail)] : rows).map((row) => pad + dark(bar) + look(row));
-  };
-  return [...last(code.replace(/^\s*\n/gm, "").trim(), light), ...last(output.trimEnd(), tint)];
+/** The code bee runs, as one row: its first line, and `…` if there is more. */
+function tool(code: string, look = dark) {
+  const [line, ...more] = code.trim().split("\n");
+  const row = line.length > room() || more.length ? line.slice(0, room() - 1) + "…" : line;
+  return pad + look(row);
 }
 
 // ── Screen ──────────────────────────────────────────────────────────────────
-// Finished rows are printed once. Below them the rest is redrawn: what bee is writing, running or thinking,
-// what you have queued, and the prompt.
+// Finished rows are printed once. Below them the rest is redrawn: what bee is writing or running, what you have
+// queued, and the prompt.
 
 type Option = { id: string; currentValue: string; options: { value: string }[] };
 
@@ -80,11 +75,11 @@ let cursor = 0; // where the cursor is in it
 let tabbed = ""; // what you typed, while Tab goes through what fits it
 let reply = ""; // the row bee is writing, until it is full
 let begun = false; // whether rows of that reply are printed already
-let thought = ""; // what bee is thinking
 let usage = ""; // how full its context is
 let options: Option[] = []; // the session's settings
 let prompts = 0; // how many bee has not answered: a turn is under way while there are any
 let printed = false; // whether anything is, yet
+let ran = false; // whether the last rows printed are code bee ran: code run in a row is not set apart
 let at = 0; // how many rows the cursor is below the top of what is redrawn
 const running = new Map<string, string>(); // the code of the calls bee is waiting on
 const queued: string[] = []; // waiting for the turn to end
@@ -94,21 +89,25 @@ const busy = () => prompts > 0;
 const up = (rows: number) => (rows ? `\x1b[${rows}A` : "");
 const clear = () => "\r" + up(at) + "\x1b[J";
 
-/** What bee is doing: the row it is writing, the code it is running, what it is thinking, and what waits. */
+/** What bee is doing: the row it is writing and the code it is running, and what waits. */
 function activity() {
-  const thinking = thought.trim().split("\n").at(-1)!.slice(0, room());
+  const code = [...running.values()].map((code) => tool(code));
   return [
     ...(reply.trim() ? [...(begun ? [] : [""]), pad + markdown(reply)] : []),
-    ...[...running.values()].flatMap((code) => ["", ...tool(code)]),
-    ...(busy() && thinking ? ["", pad + gray(italic(thinking))] : []),
+    ...(code.length ? [...(ran ? [] : [""]), ...code] : []),
     ...queued.map((text) => dark("› " + text.split("\n")[0].slice(0, room()))),
   ];
 }
 
+/** What a command is set to, shown beside it as a hint. */
+function current(id: string) {
+  if (id === "session") return usage && `${usage} of context`;
+  return options.find((option) => option.id === id)?.currentValue.split("/").at(-1) ?? "";
+}
+
 /** Redraw, after printing any rows that are finished. */
 function draw(finished: string[] = []) {
-  const status = [...options.map((option) => option.currentValue.split("/").at(-1)), usage].join(pad);
-  const size = room() - pad.length - status.length; // the prompt's width, between its mark and the status
+  const size = room();
   const chop = (text: string) => cut(text, `.{1,${size}}`);
   const input = chop(typed);
   const before = chop(typed.slice(0, cursor)); // the cursor is at the end of these rows
@@ -116,16 +115,18 @@ function draw(finished: string[] = []) {
   const last = Math.max(choices, fits.indexOf(typed) + 1); // the hints shown end at the one Tab is on
   const shown = fits.slice(last - choices, last);
   const from = (tabbed || typed).match(/^\/\S*\s+/)?.[0].length ?? 0; // each hint is shown from where it differs
+  const widest = Math.max(...shown.map((hint) => hint.length));
   const below = input.length - before.length + shown.length;
   const turning = spinner[Math.floor(Date.now() / frame) % spinner.length];
   const rows = [
     ...finished,
     ...activity(),
     "",
-    `${amber(busy() ? turning : "›")} ${input[0].padEnd(size)}${pad}${dark(status)}`,
+    `${amber(busy() ? turning : "›")} ${input[0]}`,
     ...input.slice(1).map((row) => pad + row),
     ...shown.map((hint) => {
-      const text = hint.slice(from, room());
+      const named = hint.match(/^\/(\S+) $/)?.[1]; // a command, which is shown with what it is set to
+      const text = (named ? hint.padEnd(widest) + pad + current(named) : hint).slice(from, room()).trimEnd();
       return pad + " ".repeat(from) + (hint === typed ? text : dark(text)); // the one Tab is on is in the prompt
     }),
   ];
@@ -139,13 +140,13 @@ function draw(finished: string[] = []) {
 function print(rows: string[], apart = true) {
   draw(rows.length && apart && printed ? ["", ...rows] : rows);
   printed ||= rows.length > 0;
+  ran &&= !rows.length;
 }
 
 /** A reply arrives in pieces. Its rows are printed as they fill, and the last waits for more. */
 function stream(text: string) {
   const rows = wrap(reply + text);
   reply = rows.pop()!;
-  thought = "";
   print(rows.map((row) => pad + markdown(row)), !begun);
   begun ||= rows.length > 0;
 }
@@ -178,7 +179,6 @@ type Update = {
   content: { text: string };
   toolCallId: string;
   rawInput: { command: string };
-  rawOutput: string;
   status: string;
   used: number;
   size: number;
@@ -191,20 +191,17 @@ const updates: Record<string, (update: Update) => void> = {
     user(content.text);
   },
   agent_message_chunk: ({ content }) => stream(content.text),
-  agent_thought_chunk: ({ content }) => {
-    thought += content.text;
+  tool_call: ({ toolCallId, rawInput }) => {
+    end();
+    running.set(toolCallId, rawInput.command);
     draw();
   },
-  tool_call: ({ toolCallId, rawInput }) => {
-    running.set(toolCallId, rawInput.command);
-    thought = "";
-    end();
-  },
-  tool_call_update: ({ toolCallId, status, rawOutput }) => {
+  tool_call_update: ({ toolCallId, status }) => {
     if (status !== "completed" && status !== "failed") return;
     const code = running.get(toolCallId) ?? "";
     running.delete(toolCallId);
-    print(tool(code, rawOutput, status === "failed" ? red : gray));
+    print([tool(code, status === "failed" ? red : dark)], !ran);
+    ran = true;
   },
   usage_update: ({ used, size }) => {
     usage = `${Math.ceil((100 * used) / size)}%`;
@@ -269,7 +266,6 @@ async function prompt(text: string) {
   prompts++;
   const done = () => {
     if (--prompts) return; // the turn answers each prompt in it
-    thought = "";
     end();
   };
   const { stopReason } = await call("session/prompt", { sessionId, prompt: [{ type: "text", text }] }).finally(done);
