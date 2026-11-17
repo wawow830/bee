@@ -72,7 +72,8 @@ function draw(finished: string[] = []) {
   const chop = (text: string) => cut(text, `.{1,${size}}`);
   const input = chop(typed);
   const before = chop(typed.slice(0, cursor)); // the cursor is at the end of these rows
-  const below = input.length - before.length;
+  const shown = hints(typed).slice(0, 8);
+  const below = input.length - before.length + shown.length;
   const mark = busy ? "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[Math.floor(Date.now() / 80) % 10] : "›";
   const thinking = thought.trim().split("\n").at(-1)!.slice(0, out.columns - 3);
   const rows = [
@@ -84,6 +85,7 @@ function draw(finished: string[] = []) {
     "",
     `${amber(mark)} ${input[0].padEnd(size)}  ${dark(status)}`,
     ...input.slice(1).map((row) => "  " + row),
+    ...shown.map((hint, n) => "  " + (n ? dark : gray)(hint.slice(0, out.columns - 3))),
   ];
   // One frame: erase what was drawn, draw, and put the cursor where it is in the prompt.
   out.write(`\x1b[?2026h${clear()}${rows.join("\n")}${up(below)}\x1b[${3 + before.at(-1)!.length}G\x1b[?2026l`);
@@ -201,6 +203,7 @@ async function open(id?: string) {
   const opened = await call(id ? "session/load" : "session/new", { sessionId: id, cwd, mcpServers: [] });
   sessionId = id ?? opened.sessionId;
   options = opened.configOptions;
+  others = (await sessions()).filter((session) => session.title && session.sessionId !== sessionId);
 }
 
 /** Send bee a prompt, and wait for its turn to end. */
@@ -216,37 +219,49 @@ async function prompt(text: string) {
   if (stopReason !== "end_turn") note(stopReason);
 }
 
-// `/model` lists the models and `/model <id>` picks one, or `/model opus` the one with that in its id.
-// So does every other setting bee has.
-async function set(id: string, wanted = "") {
-  const option = options.find((option) => option.id === id);
-  if (!option) return note([...options.map((option) => "/" + option.id), "/session", "/new"].join("  "));
-  const values = option.options.map((choice) => choice.value);
-  const exact = values.filter((value) => value === wanted || value.split("/").at(-1) === wanted);
-  const found = exact.length ? exact : values.filter((value) => wanted && value.includes(wanted));
-  if (found.length !== 1) return note((found.length ? found : values).join("\n"));
-  options = (await call("session/set_config_option", { sessionId, configId: id, value: found[0] })).configOptions;
-  draw();
+// ── Commands ────────────────────────────────────────────────────────────────
+// `/model`, `/thinking` and `/session` each take one of their values: the one named, or else those with what you
+// typed in them. What fits is shown under the prompt. Tab takes the first, and so does Enter once only one fits.
+
+let others: Session[] = []; // the other sessions here, latest first
+
+const title = (session: Session) => session.title!.split("\n")[0].trim();
+
+function commands() {
+  const settings = options.map((option) => ({
+    id: option.id,
+    values: option.options.map((choice) => choice.value),
+    pick: async (value: string) => {
+      options = (await call("session/set_config_option", { sessionId, configId: option.id, value })).configOptions;
+    },
+  }));
+  const session = {
+    id: "session",
+    values: ["new", ...others.map(title)],
+    pick: (value: string) => open(others.find((other) => title(other) === value)?.sessionId),
+  };
+  return [...settings, session];
 }
 
-// `/session` lists the other sessions here, and `/session <words>` opens the one with them in its title or id.
-async function reopen(wanted: string) {
-  const others = (await sessions()).filter((session) => session.title && session.sessionId !== sessionId);
-  const named = (s: Session) => `${s.sessionId} ${s.title}`.toLowerCase().includes(wanted.toLowerCase());
-  const found = wanted ? others.filter(named) : [];
-  if (found.length !== 1) {
-    const titles = (found.length ? found : others).slice(0, 10).map((session) => session.title!.split("\n")[0]);
-    return note(titles.join("\n") || "No other sessions here.");
-  }
-  await open(found[0].sessionId);
-  draw();
+/** What the prompt could become: the commands it starts, or the values of its command that fit the words after. */
+function hints(text: string): string[] {
+  const [, id, words] = text.match(/^\/(\S*)(?:\s+(.*))?$/s) ?? [];
+  if (id === undefined) return [];
+  const all = commands();
+  if (words === undefined) return all.map((command) => `/${command.id} `).filter((hint) => hint.startsWith("/" + id));
+  const values = all.find((command) => command.id === id)?.values ?? [];
+  const wanted = words.trim();
+  const named = values.filter((value) => value === wanted || value.endsWith("/" + wanted));
+  const found = named.length ? named : values.filter((value) => value.toLowerCase().includes(wanted.toLowerCase()));
+  return found.map((value) => `/${id} ${value}`);
 }
 
-function command(text: string) {
-  const [name, ...words] = text.slice(1).split(/\s+/);
-  if (name === "new") return open().then(() => note("New session."));
-  if (name === "session") return reopen(words.join(" "));
-  return set(name, words[0]);
+/** Run `/<id> <value>`, as a hint wrote it. */
+async function command(text: string) {
+  note(text);
+  const [, id, value] = text.match(/^\/(\S+) (.*)$/s)!;
+  await commands().find((command) => command.id === id)!.pick(value);
+  draw();
 }
 
 let last: Promise<unknown> = Promise.resolve(); // the last thing you sent, done: each waits for the one before
@@ -279,8 +294,6 @@ function move(to: number) {
   cursor = Math.max(0, Math.min(typed.length, to));
 }
 
-const wordBefore = () => typed.slice(0, cursor).search(/\S*\s*$/); // where the word before the cursor starts
-const wordAfter = () => cursor + typed.slice(cursor).match(/^\s*\S*/)![0].length; // and the one after it ends
 const stop = () => send({ method: "session/cancel", params: { sessionId } });
 
 function recall(step: number) {
@@ -288,25 +301,30 @@ function recall(step: number) {
   splice(0, typed.length, back ? history.at(-back) : "");
 }
 
+function tab() {
+  const [hint] = hints(typed);
+  if (hint) splice(0, typed.length, hint);
+}
+
 function enter() {
   const text = typed.trim();
+  const [hint, ...more] = hints(typed);
+  if (text.startsWith("/") && (!hint || more.length || hint.endsWith(" "))) return tab(); // not one value yet
   if (!text) return;
   history.push(text);
   back = 0;
   splice(0, typed.length);
-  submit(text);
+  submit(hint ?? text);
 }
 
 const keys: Record<string, () => unknown> = {
   "\r": enter,
+  "\t": tab,
   "\x1b\r": () => splice(cursor, cursor, "\n"), // Alt-Enter
   "\x7f": () => splice(Math.max(0, cursor - 1), cursor), // Backspace
   "\x1b[3~": () => splice(cursor, cursor + 1), // Delete
-  "\x04": () => (typed ? splice(cursor, cursor + 1) : quit()), // Ctrl-D, which quits on an empty line
-  "\x17": () => splice(wordBefore(), cursor), // Ctrl-W and Alt-Backspace: the word before the cursor
-  "\x1b\x7f": () => splice(wordBefore(), cursor),
-  "\x15": () => splice(0, cursor), // Ctrl-U and Ctrl-K: all before the cursor, and all after it
-  "\x0b": () => splice(cursor, typed.length),
+  "\x17": () => splice(typed.slice(0, cursor).search(/\S*\s*$/), cursor), // Ctrl-W: the word before the cursor
+  "\x15": () => splice(0, cursor), // Ctrl-U
   "\x01": () => move(0), // Ctrl-A, and Home as terminals send it
   "\x1b[H": () => move(0),
   "\x1b[1~": () => move(0),
@@ -315,10 +333,6 @@ const keys: Record<string, () => unknown> = {
   "\x1b[4~": () => move(typed.length),
   "\x1b[D": () => move(cursor - 1), // Left and Right
   "\x1b[C": () => move(cursor + 1),
-  "\x1b[1;5D": () => move(wordBefore()), // Ctrl-Left and Ctrl-Right, and Alt-B and Alt-F: a word at a time
-  "\x1b[1;5C": () => move(wordAfter()),
-  "\x1bb": () => move(wordBefore()),
-  "\x1bf": () => move(wordAfter()),
   "\x1b[A": () => recall(1), // Up and Down
   "\x1b[B": () => recall(-1),
   "\x1b": () => busy && stop(), // Esc

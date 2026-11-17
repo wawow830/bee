@@ -46,10 +46,11 @@ bee "…"        # start with a prompt
 ```
 
 Enter sends, Alt-Enter is a new line, Up and Down recall what you said in the session, Esc stops a turn, Ctrl-C clears,
-stops or quits. The rest edit as in a shell: Ctrl-A, Ctrl-E, Ctrl-K, Ctrl-U, Ctrl-W, Ctrl-D, Alt-Backspace, and Ctrl-Left
-and Ctrl-Right. `/model` and `/thinking` list their values; `/model <id>` sets one, and `/model opus` the one whose id has `opus`
-in it. `/session` lists the other sessions here, `/session <words>` opens the one with them in its title, and `/new`
-starts another.
+stops or quits. Ctrl-A, Ctrl-E, Ctrl-W and Ctrl-U edit as in a shell.
+
+`/model`, `/thinking` and `/session` each take a value: `/model opus` is the model with `opus` in its id, and
+`/session` is `new` or the title of another session here. What fits is shown under the prompt as you type. Tab takes
+the first, and Enter does too once only one fits.
 
 ## How it works
 
