@@ -68,9 +68,9 @@ a summary appended after line 0. A rewind is a line appended after any other. A 
 cut to 20,000 characters. If what it wrote is an image, the model sees the image. The computer is what lasts: files,
 and whatever the command left running.
 
-**The model runs the harness** with that tool, by appending lines to the session file. There is no API for it, and
-the prompt only says where the file is and how it chains. The harness writes each reply and its results after whatever the reply's commands
-appended, so the model continues from its own line. This is how it can compact its context, rewind, or change a setting.
+**The model runs the harness** with that tool, by appending lines to the session file. There is no API for it. The
+prompt says where the file is, what a line is, and that each reply is written after its commands end, so the model
+continues from whatever line they appended. This is how it can compact its context, rewind, or change a setting.
 
 **The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model
 what to do. Instructions are yours, in `AGENTS.md`.

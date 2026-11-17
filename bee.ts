@@ -126,15 +126,15 @@ function chain(lines: Line[]): Message[] {
 const BASH = {
   name: "bash",
   description:
-    "Runs a command in a new bash in the working directory. Returns what it wrote to stdout and stderr, cut to " +
-    "20,000 characters, or the image, if that is what it wrote.",
+    "Runs a command in a new bash in the working directory. Returns what it wrote to stdout and stderr cut to " +
+    "20,000 characters, or the image.",
   parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
 };
 
 const system = (cwd: string, path: string) => `
 You are an agent in the bee harness.
 session: ${path}
-Your context is the session file, followed by parent from its last line. You can append to it.
+Each line of the session file is {parent, message}, where parent is the number of the line it follows. Your context is the messages from the last line back to line 0. Each reply is written after its commands end.
 
 ${instructions(cwd)}`.trim();
 
