@@ -265,11 +265,11 @@ function render(text: string, whole: boolean, voice: Voice) {
 
 // ── Screen ──────────────────────────────────────────────────────────────────
 // The screen is bee's own: the transcript, and under it what you have queued and the prompt. The transcript is turns,
-// each what you said and what came of it. Once a turn is over it shows what you said and the answer, the last thing bee
-// said, and folds away the work before it: what bee thought and ran, and what it said on the way. Clicking what you said
-// or the answer unfolds it. While bee works, there is no answer yet, and the work is shown. In it, each thing is its
-// first row, and clicking it shows all of it: the whole thought, or the whole command and what it printed. The wheel
-// scrolls, and at the bottom the transcript follows what comes.
+// each what you said and what came of it. Once a turn is over it shows what you said and the answer, the last thing
+// bee said, and folds away the work before it: what bee thought and ran, and what it said on the way. Clicking what
+// you said or the answer unfolds it. While bee works, there is no answer yet, and the work is shown. In it, each thing
+// is its first row, and clicking it shows all of it: the whole thought, or the whole command and what it printed. The
+// wheel scrolls, and at the bottom the transcript follows what comes.
 
 type Option = { id: string; currentValue: string; options: { value: string }[] };
 
