@@ -38,8 +38,12 @@ const SESSIONS = join(HOME, "sessions");
 const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
 const user = (content: UserMessage["content"]): UserMessage => ({ role: "user", content, timestamp: Date.now() });
 
+/** A new session's line 0, kept here until its first message, so that a session never used leaves no file. */
+const unwritten = new Map<string, Line>();
+
 /** The lines. One that is not JSON is empty, and one that names no earlier line follows the line before it. */
 function read(sid: string): Line[] {
+  if (unwritten.has(sid)) return [unwritten.get(sid)!];
   if (!/^[\w-]+$/.test(sid) || !existsSync(file(sid)))
     throw Object.assign(new Error(`No session ${sid}`), { code: -32002 });
   const parse = (text: string) => {
@@ -57,6 +61,9 @@ function read(sid: string): Line[] {
 
 /** Append a line, after the last one unless it names a parent. */
 function append(sid: string, { parent, ...rest }: Partial<Line>) {
+  const first = unwritten.get(sid);
+  if (first && !rest.message) return void unwritten.set(sid, { ...first, ...rest }); // a setting, before any message
+  if (first) unwritten.delete(sid), appendFileSync(file(sid), JSON.stringify(first) + "\n");
   const line = JSON.stringify({ parent: parent ?? read(sid).length - 1, ...rest });
   const ended = readFileSync(file(sid), "utf8").endsWith("\n");
   appendFileSync(file(sid), (ended ? "" : "\n") + line + "\n");
@@ -69,7 +76,7 @@ function create(cwd: string): string {
   const sid = randomUUID();
   const defaults = existsSync(SETTINGS) ? JSON.parse(readFileSync(SETTINGS, "utf8")) : {};
   const message = { role: "system", content: prompt(cwd, file(sid)), toolsAdded: [PYTHON], timestamp: Date.now() };
-  appendFileSync(file(sid), JSON.stringify({ ...defaults, parent: null, cwd, message }) + "\n");
+  unwritten.set(sid, { ...defaults, parent: null, cwd, message });
   return sid;
 }
 

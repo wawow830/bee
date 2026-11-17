@@ -54,7 +54,7 @@ Ctrl-W and Ctrl-U edit as in a shell. `/model` and `/thinking` list their values
 **A session is a file.** `~/.bee/agent/sessions/<id>.jsonl` holds one line per message, each `{parent, message}`, where
 `parent` is the number of the line it follows. Line 0 is the system prompt. The conversation is the chain from the last
 line back to line 0, and that chain is the whole request to the model. Lines are only appended, and the harness keeps
-no other state: it reads the file before every step.
+no other state: it reads the file before every step. The file is written with the first message, so a session never used leaves none.
 
 **One act does everything.** Appending a line after an earlier one continues the conversation from there. Compaction is
 a summary appended after line 0. A rewind is a line appended after any other. A setting is a line too, `{model}` or
