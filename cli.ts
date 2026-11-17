@@ -27,7 +27,7 @@ const first = args
 // ── Look ────────────────────────────────────────────────────────────────────
 // Each colour means one thing. Amber is where you type. Words are in the terminal's own colour, code in gray, and
 // red is what failed. All else is dark: marks, hints, and what this terminal says for itself. What bee thinks is as
-// what it says, only faint and italic, and is shown only while bee thinks it.
+// what it says, only faint and italic.
 
 const out = process.stdout;
 
@@ -49,7 +49,6 @@ const mark = "› "; // what you say begins with it
 const spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"; // the mark, while bee works
 const frame = 80; // how many milliseconds each turn of the spinner shows
 const choices = 8; // how many hints are shown
-const glimpse = 3; // how many rows of what bee is thinking are shown
 
 /** How wide a row can be after `indent` columns. The last column stays free. */
 const room = (indent = pad.length) => out.columns - 1 - indent;
@@ -63,8 +62,8 @@ const fill = (text: string, size: number) => cut(text, `.{1,${size}}(?=\\s|$)\\s
 /** Rows no wider than `size`, broken at a space where there is one. */
 const wrap = (text: string, size = room()) => fill(text, size).map((row) => row.trimEnd());
 
-/** The code bee runs, as one row: its first line, and `…` if there is more. */
-function tool(text: string, look = gray) {
+/** Text at a glance, as one row: its first line, and `…` if there is more. */
+function glance(text: string, look: Paint) {
   const [line, ...more] = text.trim().split("\n");
   const row = line.length > room() || more.length ? line.slice(0, room() - 1) + "…" : line;
   return pad + look(row);
@@ -170,9 +169,9 @@ function prose(line: string, done: boolean, look: number) {
 }
 
 /** A line of code, as it is. Its rows hang under where its text begins. */
-function source(line: string, look: number) {
+function source(line: string, look: Paint) {
   const [, indent, text] = line.replace(/\t/g, "    ").match(/^(\s*)(.*)/)!;
-  return hang(indent, wrap(text, room(pad.length + indent.length)).map(looks(look | mono)));
+  return hang(indent, wrap(text, room(pad.length + indent.length)).map(look));
 }
 
 /** Where a block of code begins or ends. */
@@ -264,8 +263,9 @@ function* blocks(reply: string, whole: boolean): Generator<Block> {
 function code([, ...lines]: string[], done: boolean, look: number) {
   const closed = fence(lines.at(-1) ?? "");
   const body = closed ? lines.slice(0, -1) : lines;
-  const rows = body.flatMap((line) => source(line, look));
-  return settle(rows, done, rows.length - (closed || !body.length ? 0 : source(body.at(-1)!, look).length));
+  const paint = looks(look | mono);
+  const rows = body.flatMap((line) => source(line, paint));
+  return settle(rows, done, rows.length - (closed || !body.length ? 0 : source(body.at(-1)!, paint).length));
 }
 
 /** How each kind of block is shown. A table's rows are final only once it is done, as each may change its widths. */
@@ -275,17 +275,17 @@ const shows: Record<Kind, (lines: string[], done: boolean, look: number) => Rend
   table: (lines, done, look) => settle(table(lines, done, look), done, 0),
 };
 
-/**
- * A reply, or a thought, as rows in its `look`, and how many of them are final: those of each block that nothing to
- * come can change.
- */
-function render(reply: string, whole: boolean, look = 0): Rendered {
+/** How bee says something: the look of its words, and whether its blocks are set apart by blank lines. */
+type Voice = { look: number; apart: boolean };
+
+/** A reply, or a thought, as rows in its voice, and how many are final: those nothing to come can change. */
+function render(text: string, whole: boolean, voice: Voice): Rendered {
   const rows: string[] = [];
   let final = 0;
-  for (const { kind, lines, apart, done } of blocks(reply, whole)) {
-    const { rows: shown, final: settled } = shows[kind](lines, done, look);
+  for (const { kind, lines, apart, done } of blocks(text, whole)) {
+    const { rows: shown, final: settled } = shows[kind](lines, done, voice.look);
     if (!shown.length) continue;
-    const before = apart && rows.length ? [""] : [];
+    const before = apart && voice.apart && rows.length ? [""] : [];
     if (settled) final = rows.length + before.length + settled;
     rows.push(...before, ...shown);
   }
@@ -294,8 +294,9 @@ function render(reply: string, whole: boolean, look = 0): Rendered {
 
 // ── Screen ──────────────────────────────────────────────────────────────────
 // The transcript is everything said, each thing shown at the screen's width. Its final rows are printed once, and
-// below them the rest is redrawn: what may yet change, what bee is thinking or running, what you have queued, and the
-// prompt. When the screen's width changes, all of it is shown again at the new width.
+// below them the rest is redrawn: what may yet change, what bee is running, what you have queued, and the prompt.
+// Bee's work, what it thinks and the code it runs, is shown in brief, a row for each thing, or in full with what the
+// code printed. Ctrl-O turns from one to the other. When the screen's width changes, or that, all of it is shown again.
 
 type Option = { id: string; currentValue: string; options: { value: string }[] };
 
@@ -308,14 +309,14 @@ type Entry = { said: Said; render: () => Rendered };
 let typed = ""; // the prompt
 let cursor = 0; // where the cursor is in it
 let tabbed = ""; // what you typed, while Tab goes through what fits it
-let writing: { text: string; whole: boolean } | undefined; // what bee has written of the reply it is writing
-let thinking = ""; // what bee is thinking, until it says or runs something
+let writing: { said: "thought" | "reply"; text: string; whole: boolean } | undefined; // what bee is thinking or saying
 let usage = ""; // how full its context is
 let options: Option[] = []; // the session's settings
 let prompts = 0; // how many bee has not answered: a turn is under way while there are any
 let printed = 0; // how many rows of the transcript are printed
 let at = 0; // how many rows the cursor is below the top of what is redrawn
 const transcript: Entry[] = [];
+let brief = true; // whether bee's work is shown in brief, or in full
 const running = new Map<string, string>(); // the code of the calls bee is waiting on
 const queued: string[] = []; // waiting for the turn to end
 const history: string[] = []; // what you have said, here and in the sessions opened, for Up to recall
@@ -327,11 +328,11 @@ const clear = () => "\r" + up(at) + "\x1b[J";
 /** Rows, all of them final. */
 const final = (rows: string[]): Rendered => ({ rows, final: rows.length });
 
-/** Add to the transcript. Its rows are made again only when the screen's width or `version` changes. */
+/** Add to the transcript. Its rows are made again only when how it is shown, or `version`, changes. */
 function add(said: Said, make: () => Rendered, version = () => "") {
   let made: { at: string; rendered: Rendered } | undefined;
   const render = () => {
-    const at = `${out.columns} ${version()}`;
+    const at = `${out.columns} ${brief} ${version()}`;
     if (made?.at !== at) made = { at, rendered: make() };
     return made.rendered;
   };
@@ -339,16 +340,19 @@ function add(said: Said, make: () => Rendered, version = () => "") {
   draw();
 }
 
+/** Whether a thing is bee at work: thinking, or running code. */
+const working = (said: Said) => said === "thought" || said === "tool";
+
 /**
  * Things said as rows: of each, its final rows, or all of them. Each is set apart from the one before by a blank row,
- * unless both are code bee ran.
+ * unless both are bee at work.
  */
 function layout(entries: { said: Said; rows: string[] }[]) {
   const rows: string[] = [];
   let last: Said | undefined;
   for (const { said, rows: own } of entries) {
     if (!own.length) continue;
-    if (last && !(said === "tool" && last === "tool")) rows.push("");
+    if (last && !(working(said) && working(last))) rows.push("");
     rows.push(...own);
     last = said;
   }
@@ -365,12 +369,8 @@ function current(id: string) {
 function draw() {
   const rendered = transcript.map(({ said, render }) => ({ said, ...render() }));
   const settled = layout(rendered.map(({ said, rows, final }) => ({ said, rows: rows.slice(0, final) })));
-  const musing = render(thinking, false, thought)
-    .rows.filter((row) => row)
-    .slice(-glimpse); // its last rows
-  const thoughts = [{ said: "thought" as const, rows: musing.map((row) => pad + row) }];
-  const code = [...running.values()].map((text) => ({ said: "tool" as const, rows: [tool(text)] }));
-  const pending = layout([...rendered, ...thoughts, ...code]).slice(settled.length);
+  const code = [...running.values()].map((text) => ({ said: "tool" as const, rows: [glance(text, gray)] }));
+  const pending = layout([...rendered, ...code]).slice(settled.length);
   const finished = settled.slice(printed);
   printed = settled.length;
 
@@ -406,40 +406,48 @@ function draw() {
   at = redrawn.length - below - 1;
 }
 
-/** Show all of the transcript again, at the screen's width now: wrapped at another, its rows are not what they were. */
+/** Show all of the transcript again, as it is shown now: at another width, or in brief or full, it was not. */
 function reflow() {
   out.write("\x1b[H\x1b[2J\x1b[3J"); // the screen, and what scrolled off it, cleared
   [printed, at] = [0, 0];
   draw();
 }
 
-/** What bee thinks arrives in pieces. Its last rows are shown, below what is printed, until it says or runs something. */
-function think(text: string) {
-  if (writing) end();
-  thinking += text;
-  draw();
-}
+/** Bee's voices. A thought is faint, and its paragraphs run together, as it is bee at work. In brief, it is a glance. */
+const voices: Record<"thought" | "reply", Voice> = {
+  thought: { look: thought, apart: false },
+  reply: { look: 0, apart: true },
+};
 
-/** A reply arrives in pieces. Its rows are printed once they are final. */
-function stream(text: string) {
-  if (!writing) {
-    thinking = "";
-    const own = (writing = { text: "", whole: false });
+/** A thought or a reply arrives in pieces. Its rows are printed once they are final. */
+function stream(said: "thought" | "reply", text: string) {
+  if (writing?.said !== said) {
+    end();
+    const own = (writing = { said, text: "", whole: false });
     const make = () => {
-      const { rows, final } = render(own.text, own.whole);
+      if (brief && working(said)) return settle([glance(marked(own.text, true).text, faint)], own.whole, 0);
+      const { rows, final } = render(own.text, own.whole, voices[said]);
       return { rows: rows.map((row) => row && pad + row), final };
     };
-    add("reply", make, () => `${own.text.length} ${own.whole}`);
+    add(said, make, () => `${own.text.length} ${own.whole}`);
   }
   writing.text += text;
   draw();
 }
 
-/** What bee was thinking or saying is over: the thought is gone, and all of the reply is final. */
+/** The thought or reply is over, if there was one: all of it is final. */
 function end() {
   if (writing) writing.whole = true;
-  [writing, thinking] = [undefined, ""];
+  writing = undefined;
   draw();
+}
+
+/** Code bee ran: in brief, a glance at it; in full, all of it, and under it what it printed. */
+function ran(code: string, output: string, look: Paint) {
+  if (brief) return [glance(code, look)];
+  const lines = (text: string, paint: Paint, indent = "") =>
+    text.split("\n").flatMap((line) => source(indent + line, paint));
+  return [...lines(code.trim(), look), ...lines(output.trimEnd(), dark, pad)].map((row) => row && pad + row);
 }
 
 /** What you said. */
@@ -461,6 +469,7 @@ type Update = {
   content: { text: string };
   toolCallId: string;
   rawInput: { command: string };
+  rawOutput: string;
   status: string;
   used: number;
   size: number;
@@ -472,18 +481,18 @@ const updates: Record<string, (update: Update) => void> = {
     history.push(content.text);
     user(content.text);
   },
-  agent_thought_chunk: ({ content }) => think(content.text),
-  agent_message_chunk: ({ content }) => stream(content.text),
+  agent_thought_chunk: ({ content }) => stream("thought", content.text),
+  agent_message_chunk: ({ content }) => stream("reply", content.text),
   tool_call: ({ toolCallId, rawInput }) => {
     end();
     running.set(toolCallId, rawInput.command);
     draw();
   },
-  tool_call_update: ({ toolCallId, status }) => {
+  tool_call_update: ({ toolCallId, status, rawOutput }) => {
     if (status !== "completed" && status !== "failed") return;
     const code = running.get(toolCallId) ?? "";
     running.delete(toolCallId);
-    add("tool", () => final([tool(code, status === "failed" ? red : gray)]));
+    add("tool", () => final(ran(code, rawOutput ?? "", status === "failed" ? red : gray)));
   },
   usage_update: ({ used, size }) => {
     usage = `${Math.ceil((100 * used) / size)}%`;
@@ -670,6 +679,7 @@ const keys: Record<string, () => unknown> = {
   "\x1b[C": () => move(cursor + 1), // Right
   "\x1b[A": () => recall(1), // Up
   "\x1b[B": () => recall(-1), // Down
+  "\x0f": () => ((brief = !brief), reflow()), // Ctrl-O: bee's work in full, or in brief
   "\x1b": () => busy() && stop(), // Esc
   "\x03": () => (typed ? splice(0, typed.length) : busy() ? stop() : quit()), // Ctrl-C: clears, else stops, else quits
 };
