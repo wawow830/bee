@@ -414,7 +414,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     .then(handlers[method] ?? unknown)
     .then(
       (result) => reply({ result: result ?? {} }),
-      (error) => reply({ error: { code: error.code ?? -32603, message: error.message } }),
+      (error) => reply({ error: { code: Number.isInteger(error.code) ? error.code : -32603, message: error.message } }),
     );
 }
 process.exit(); // the editor hung up
