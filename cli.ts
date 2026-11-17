@@ -26,7 +26,8 @@ const first = args
 
 // ── Look ────────────────────────────────────────────────────────────────────
 // Each colour means one thing. Amber is where you type. Words are in the terminal's own colour, code in gray, and
-// red is what failed. All else is dark: marks, hints, and what this terminal says for itself.
+// red is what failed. All else is dark: marks, hints, and what this terminal says for itself. What bee thinks is as
+// what it says, only faint and italic.
 
 const out = process.stdout;
 
@@ -41,6 +42,7 @@ const style =
 const color = (rgb: number) => style(`38;2;${rgb >> 16};${(rgb >> 8) & 255};${rgb & 255}`, "39");
 const [amber, gray, dark, red] = [0xffaf00, 0x8a8a8a, 0x4e4e4e, 0xff5f5f].map(color);
 const bold = style("1", "22");
+const faint = style("2;3", "22;23");
 
 const pad = "  "; // every row begins with it, or with a mark as wide
 const mark = "› "; // what you say begins with it
@@ -72,9 +74,18 @@ function tool(text: string, look = gray) {
 // between blocks are one blank row, and there are none before or after them. While a reply arrives, a row is final
 // once nothing more of it can change the row. Those are printed, and the rest wait below them.
 
-// A look is which marks hold: bold, code, or both.
-const [strong, mono] = [1, 2];
-const looks: Paint[] = [(text) => text, bold, gray, (text) => bold(gray(text))];
+// A look is which of these hold: bold, code, thought.
+const [strong, mono, thought] = [1, 2, 4];
+
+/** Text in a look. */
+const looks =
+  (look: number): Paint =>
+  (text) => {
+    if (look & mono) text = gray(text);
+    if (look & strong) text = bold(text);
+    if (look & thought) text = faint(text);
+    return text;
+  };
 
 /** Text with its marks taken out, the look of each character, and where in it a mark not yet closed is. */
 type Marked = { text: string; each: number[]; open: number };
@@ -126,7 +137,7 @@ function paint({ text, each, open }: Marked, size: number): Rendered {
     let painted = "";
     for (let start = 0, end = 1; start < kept.length; end++) {
       if (end < kept.length && each[from + end] === each[from + start]) continue;
-      painted += looks[each[from + start]](kept.slice(start, end));
+      painted += looks(each[from + start])(kept.slice(start, end));
       start = end;
     }
     from += row.length;
@@ -145,22 +156,22 @@ const settle = (rows: string[], done: boolean, final: number): Rendered => ({
 /** Rows after `lead`: the first begins with it, and the rest under where the first's text begins. */
 const hang = (lead: string, rows: string[]) => rows.map((row, n) => (n ? " ".repeat(width(lead)) : lead) + row);
 
-/** A line of prose. A heading is bold, and a list item's rows hang under its text. */
-function prose(line: string, done: boolean) {
+/** A line of prose, in the `look` of what it is part of. A heading is bold, and a list item's rows hang under its text. */
+function prose(line: string, done: boolean, look: number) {
   const heading = line.match(/^#{1,6}\s+(.*)/);
   const [, indent = "", item = "", body = line] = heading ? [] : (line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)/) ?? []);
   const lead = item && indent + (/\d/.test(item) ? item : "•") + " ";
   const { rows, final } = paint(
-    marked(heading?.[1] ?? body, done, heading ? strong : 0),
+    marked(heading?.[1] ?? body, done, heading ? look | strong : look),
     room(pad.length + lead.length),
   );
-  return settle(hang(dark(lead), rows), done, Math.min(final, rows.length - 1)); // the last row may yet grow
+  return settle(hang(looks(look)(dark(lead)), rows), done, Math.min(final, rows.length - 1)); // the last row may yet grow
 }
 
 /** A line of code, as it is. Its rows hang under where its text begins. */
-function source(line: string) {
+function source(line: string, look: number) {
   const [, indent, text] = line.replace(/\t/g, "    ").match(/^(\s*)(.*)/)!;
-  return hang(indent, wrap(text, room(pad.length + indent.length)).map(gray));
+  return hang(indent, wrap(text, room(pad.length + indent.length)).map(looks(look | mono)));
 }
 
 /** Where a block of code begins or ends. */
@@ -184,13 +195,15 @@ const isRule = (line: string) => /^[\s|:-]+$/.test(line) && line.includes("-");
  * The lines of a table as rows. Each column is as wide as what is in it, or narrower if the table must be, and is
  * aligned as its rule says. The head is bold, with a rule under it.
  */
-function table(lines: string[], whole: boolean) {
+function table(lines: string[], whole: boolean, look: number) {
   const gap = pad; // between columns
   const rule = cells(lines.find(isRule) ?? "");
   const headed = isRule(lines[1] ?? "");
   const content = lines.filter((line) => !isRule(line)).map(cells);
   const columns = [...Array(Math.max(...content.map((row) => row.length))).keys()];
-  const text = content.map((row, r) => columns.map((n) => marked(row[n] ?? "", whole, headed && !r ? strong : 0)));
+  const text = content.map((row, r) =>
+    columns.map((n) => marked(row[n] ?? "", whole, headed && !r ? look | strong : look)),
+  );
   const widths = columns.map((n) => Math.max(1, ...text.map((row) => row[n].text.length)));
   const sum = () => widths.reduce((sum, each) => sum + each, 0);
   while (sum() > room() - gap.length * (columns.length - 1) && Math.max(...widths) > 1) {
@@ -207,7 +220,7 @@ function table(lines: string[], whole: boolean) {
     const painted = row.map((cell, n) => paint(cell, widths[n]).rows);
     const height = Math.max(...painted.map((each) => each.length));
     const shown = [...Array(height).keys()].map((m) => columns.map((n) => place(painted[n][m] ?? "", n)).join(gap));
-    const under = headed && !r ? [dark(widths.map((each) => "─".repeat(each)).join(gap))] : [];
+    const under = headed && !r ? [looks(look)(dark(widths.map((each) => "─".repeat(each)).join(gap)))] : [];
     return [...shown.map((each) => each.trimEnd()), ...under];
   });
 }
@@ -247,26 +260,29 @@ function* blocks(reply: string, whole: boolean): Generator<Block> {
 }
 
 /** Code between fences. Until it is `done`, the rows of the line being written are not final: it may yet be a fence. */
-function code([, ...lines]: string[], done: boolean) {
+function code([, ...lines]: string[], done: boolean, look: number) {
   const closed = fence(lines.at(-1) ?? "");
   const body = closed ? lines.slice(0, -1) : lines;
-  const rows = body.flatMap(source);
-  return settle(rows, done, rows.length - (closed || !body.length ? 0 : source(body.at(-1)!).length));
+  const rows = body.flatMap((line) => source(line, look));
+  return settle(rows, done, rows.length - (closed || !body.length ? 0 : source(body.at(-1)!, look).length));
 }
 
 /** How each kind of block is shown. A table's rows are final only once it is done, as each may change its widths. */
-const shows: Record<Kind, (lines: string[], done: boolean) => Rendered> = {
-  prose: ([line], done) => prose(line, done),
+const shows: Record<Kind, (lines: string[], done: boolean, look: number) => Rendered> = {
+  prose: ([line], done, look) => prose(line, done, look),
   code,
-  table: (lines, done) => settle(table(lines, done), done, 0),
+  table: (lines, done, look) => settle(table(lines, done, look), done, 0),
 };
 
-/** A reply as rows, and how many of them are final: those of each block that nothing to come can change. */
-function render(reply: string, whole: boolean): Rendered {
+/**
+ * A reply, or a thought, as rows in its `look`, and how many of them are final: those of each block that nothing to
+ * come can change.
+ */
+function render(reply: string, whole: boolean, look = 0): Rendered {
   const rows: string[] = [];
   let final = 0;
   for (const { kind, lines, apart, done } of blocks(reply, whole)) {
-    const { rows: shown, final: settled } = shows[kind](lines, done);
+    const { rows: shown, final: settled } = shows[kind](lines, done, look);
     if (!shown.length) continue;
     const before = apart && rows.length ? [""] : [];
     if (settled) final = rows.length + before.length + settled;
@@ -283,7 +299,7 @@ function render(reply: string, whole: boolean): Rendered {
 type Option = { id: string; currentValue: string; options: { value: string }[] };
 
 /** Who said a thing in the transcript, or what it is. */
-type Said = "user" | "reply" | "tool" | "note";
+type Said = "user" | "thought" | "reply" | "tool" | "note";
 
 /** A thing in the transcript, as rows at the screen's width. */
 type Entry = { said: Said; render: () => Rendered };
@@ -291,7 +307,7 @@ type Entry = { said: Said; render: () => Rendered };
 let typed = ""; // the prompt
 let cursor = 0; // where the cursor is in it
 let tabbed = ""; // what you typed, while Tab goes through what fits it
-let reply: { text: string; whole: boolean } | undefined; // what bee has written of the reply it is writing
+let writing: { said: "thought" | "reply"; text: string; whole: boolean } | undefined; // what bee is thinking or saying
 let usage = ""; // how full its context is
 let options: Option[] = []; // the session's settings
 let prompts = 0; // how many bee has not answered: a turn is under way while there are any
@@ -391,24 +407,25 @@ function reflow() {
   draw();
 }
 
-/** A reply arrives in pieces. Its rows are printed once they are final. */
-function stream(text: string) {
-  if (!reply) {
-    const own = (reply = { text: "", whole: false });
+/** A thought or a reply arrives in pieces. Its rows are printed once they are final. */
+function stream(said: "thought" | "reply", text: string) {
+  if (writing?.said !== said) {
+    end();
+    const own = (writing = { said, text: "", whole: false });
     const make = () => {
-      const { rows, final } = render(own.text, own.whole);
+      const { rows, final } = render(own.text, own.whole, said === "thought" ? thought : 0);
       return { rows: rows.map((row) => row && pad + row), final };
     };
-    add("reply", make, () => `${own.text.length} ${own.whole}`);
+    add(said, make, () => `${own.text.length} ${own.whole}`);
   }
-  reply.text += text;
+  writing.text += text;
   draw();
 }
 
-/** The reply is over, if there was one: all of it is final. */
+/** The thought or reply is over, if there was one: all of it is final. */
 function end() {
-  if (reply) reply.whole = true;
-  reply = undefined;
+  if (writing) writing.whole = true;
+  writing = undefined;
   draw();
 }
 
@@ -442,7 +459,8 @@ const updates: Record<string, (update: Update) => void> = {
     history.push(content.text);
     user(content.text);
   },
-  agent_message_chunk: ({ content }) => stream(content.text),
+  agent_thought_chunk: ({ content }) => stream("thought", content.text),
+  agent_message_chunk: ({ content }) => stream("reply", content.text),
   tool_call: ({ toolCallId, rawInput }) => {
     end();
     running.set(toolCallId, rawInput.command);
