@@ -67,11 +67,13 @@ type Line = Settings & { message?: Message; cwd?: string };
 const SESSIONS = join(HOME, "sessions");
 const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
 
+const SHOWN = 20_000; // characters of output the model sees per call
+
 const BASH = {
   name: "bash",
   description:
     "Runs a command in a new bash in the working directory. Returns what it wrote to stdout and stderr, cut to " +
-    "20,000 characters, or the image it wrote.",
+    `${SHOWN.toLocaleString("en")} characters, or the image it wrote.`,
   parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
 };
 
@@ -184,8 +186,6 @@ async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<str
 }
 
 // ── The tool ────────────────────────────────────────────────────────────────
-
-const SHOWN = 20_000; // characters of output the model sees per call
 
 /** The images a model can see, by how their bytes begin. */
 const IMAGES: Record<string, RegExp> = {
