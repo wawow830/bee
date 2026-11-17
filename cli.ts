@@ -270,7 +270,8 @@ function render(text: string, whole: boolean, voice: Voice) {
 // works, the work is shown, each thing as its first row, and clicking it shows all of it: the whole thought, or the
 // whole command and what it printed. Once the turn is over, ended or stopped, the work folds away behind what you said,
 // and clicking what you said or the answer unfolds it. The wheel scrolls, and at the bottom the transcript follows
-// what comes. On leaving, the transcript is left in the terminal as it was last shown.
+// what comes. Where you have scrolled to is a place in what was said, not a row, so it stays put as the screen's width
+// changes and things fold and open. On leaving, the transcript is left in the terminal as it was last shown.
 
 type Option = { id: string; currentValue: string; options: { value: string }[] };
 
@@ -280,14 +281,14 @@ type Said = "user" | "thought" | "reply" | "tool" | "note";
 /** A thing in the transcript: its rows at the screen's width, and whether it is open. */
 type Entry = { said: Said; rows: () => string[]; open: boolean };
 
-/** A row on screen, what clicking it does, and which of the rows shown of which entry it is. */
-type Row = { text: string; click?: () => void; of?: { entry: Entry; n: number; rows: string[] } };
+/** A row of the transcript: which of the rows shown of which entry it is, and what clicking it opens or shuts. */
+type Row = { text: string; of?: { entry: Entry; n: number; rows: string[] }; opens?: Entry };
 
 /**
- * A row kept at the top: its entry, how many characters of the entry come before it, how many blank rows it and those
- * after it are before the next characters, and how many rows are above it on screen.
+ * A place in the transcript, whatever the screen's width: the first character at or after it, as its entry and how
+ * many characters of the entry come before it, and how many rows with none come first.
  */
-type Kept = { entry: Entry; before: number; blank: number; above: number };
+type Place = { entry: Entry; before: number; blank: number };
 
 /** A command bee ran: its code, how it ended, and what it printed. */
 type Call = { code: string; status: string; output: string };
@@ -299,10 +300,11 @@ let writing: { said: "thought" | "reply"; text: string; whole: boolean } | undef
 let usage = ""; // how full its context is
 let options: Option[] = []; // the session's settings
 let prompts = 0; // how many bee has not answered: a turn is under way while there are any
-let top: number | undefined; // the first row of the transcript on screen, once you have scrolled; else it follows
-let at = 0; // the first row of the transcript on screen
-let kept: Kept | undefined; // the row at the top, kept there while the screen is resized, until you scroll again
-let shown: Row[] = []; // the rows of the transcript on screen
+let top: Place | undefined; // where the screen begins, once you have scrolled; else it follows the transcript
+let laid: Row[] = []; // the transcript as rows, as last drawn
+let at = 0; // the first of them on screen
+let bottom = 0; // the first on screen at the bottom
+let shown = 0; // how many are on screen
 const transcript: Entry[] = [];
 const ran = new Map<string, Call>(); // what bee ran, by the id of its call
 const queued: string[] = []; // waiting for the turn to end
@@ -326,16 +328,50 @@ function add(said: Said, make: () => string[], version = () => "") {
   draw();
 }
 
-/** Show the transcript from row `to`, or, with none, follow it. */
-function scroll(to?: number) {
-  top = to;
-  kept = undefined;
+/** How many characters a row shows, but for spaces and looks: as many, however wide the screen. */
+const characters = (row: string) => row.replace(/\x1b\[[\d;]*m|\s/g, "").length;
+
+/** Where row `n` of `rows` is. After the last row with characters, there is no place: the transcript is followed. */
+function place(rows: Row[], n: number): Place | undefined {
+  const next = rows.findIndex((row, m) => m >= n && characters(row.text));
+  const of = rows[next]?.of;
+  if (!of) return;
+  const before = of.rows.slice(0, of.n).reduce((sum, row) => sum + characters(row), 0);
+  return { entry: of.entry, before, blank: next - n };
 }
 
-/** Open what is shut, or shut what is open. What is above it stays where it is on screen. */
-function toggle(entry: Entry) {
-  scroll(at);
+/** Which of `rows` is at `place`. If its entry is not shown, it is the first row of the nearest shown before it. */
+function find(rows: Row[], { entry, before, blank }: Place) {
+  const firsts = new Map<Entry, number>(); // where each entry shown begins
+  rows.forEach((row, n) => row.of && !firsts.has(row.of.entry) && firsts.set(row.of.entry, n));
+  if (!firsts.has(entry)) {
+    const shut = transcript.slice(0, transcript.indexOf(entry)).findLast((each) => firsts.has(each));
+    return shut ? firsts.get(shut)! : 0;
+  }
+  const first = firsts.get(entry)!;
+  const own = rows[first].of!.rows;
+  let [n, sum] = [0, 0]; // the row the character is in, and how many come before it
+  while (n < own.length - 1 && sum + characters(own[n]) <= before) sum += characters(own[n++]);
+  n += first;
+  if (sum < before) return n; // the character is within the row
+  for (let up = 0; up < blank && n > 0 && !characters(rows[n - 1].text); up++) n--;
+  return n;
+}
+
+/** Show the transcript from row `to`. At the bottom, it is followed. */
+function scroll(to: number) {
+  at = Math.max(0, Math.min(bottom, to)); // so the next turn of the wheel goes on from here, before the screen is drawn
+  top = at < bottom ? place(laid, at) : undefined;
+}
+
+/** Open or shut what row `n` opens. The row stays where it is on screen. */
+function toggle(n: number) {
+  const entry = laid[n]?.opens;
+  const clicked = place(laid, n);
+  if (!entry || !clicked) return;
   entry.open = !entry.open;
+  const rows = layout();
+  top = place(rows, Math.max(0, find(rows, clicked) - (n - at)));
 }
 
 /** The transcript in turns. Each begins with what you said, or with what this terminal said. */
@@ -350,8 +386,7 @@ function turns() {
 
 /** The rows shown of `entry`, which, clicked, open `opens` if it is shut, or else shut it. */
 function clicked(entry: Entry, texts: string[], opens?: Entry): Row[] {
-  const click = opens && (() => toggle(opens));
-  return texts.map((text, n) => ({ text, click, of: { entry, n, rows: texts } }));
+  return texts.map((text, n) => ({ text, of: { entry, n, rows: texts }, opens }));
 }
 
 /**
@@ -418,45 +453,16 @@ function draw() {
     ...(more ? [pad + " ".repeat(from) + dark(`${more} more`)] : []),
   ];
   const height = Math.max(0, out.rows - prompt.length);
-  const end = Math.max(0, rows.length - height); // the first row on screen, at the bottom
-  if (top !== undefined && top >= end) top = undefined;
-  at = top ?? end;
-  shown = rows.slice(at, at + height);
-  const screen = [...shown.map((row) => row.text), ...prompt].slice(-out.rows);
+  laid = rows;
+  bottom = Math.max(0, rows.length - height);
+  at = top ? Math.min(find(rows, top), bottom) : bottom;
+  const visible = rows.slice(at, at + height).map((row) => row.text);
+  shown = visible.length;
+  const screen = [...visible, ...prompt].slice(-out.rows);
   // One frame: each row drawn over the one before, and the cursor put where it is in the prompt.
   const column = pad.length + before.at(-1)!.length + 1;
   const drawn = screen.map((row) => row + "\x1b[K").join("\r\n");
   out.write(`\x1b[?2026h\x1b[H${drawn}\x1b[J\x1b[${screen.length - below};${column}H\x1b[?2026l`);
-}
-
-/** How many characters a row shows, but for spaces and looks: the same, however wide the rows of a text are. */
-const characters = (row: string) => row.replace(/\x1b\[[\d;]*m|\s/g, "").length;
-
-/** How many of `rows` just before row `n` show no characters. */
-const blanks = (rows: string[], n: number) => n - 1 - rows.findLastIndex((row, m) => m < n && characters(row));
-
-/**
- * Draw the screen again at its new width. Once you have scrolled, the row at the top stays at the top, with as many
- * rows above it on screen: of the same entry, the row the same character is in.
- */
-function resize() {
-  const above = shown.findIndex((row) => row.of);
-  const was = shown[above]?.of;
-  if (top !== undefined && was && !kept) {
-    const before = was.rows.slice(0, was.n).reduce((sum, row) => sum + characters(row), 0);
-    const blank = was.rows.slice(was.n).findIndex(characters);
-    kept = { entry: was.entry, before, blank: blank < 0 ? was.rows.length - was.n : blank, above };
-  }
-  const rows = kept ? layout() : [];
-  const first = rows.findIndex((row) => row.of?.entry === kept!.entry);
-  if (kept && first >= 0) {
-    const own = rows[first].of!.rows;
-    let [n, sum] = [0, 0]; // the row the character is in, and how many come before it
-    while (n < own.length - 1 && sum + characters(own[n]) <= kept.before) sum += characters(own[n++]);
-    if (sum === kept.before) n -= Math.min(kept.blank, blanks(own, n));
-    top = Math.max(0, first + n - kept.above);
-  }
-  draw();
 }
 
 /** Bee's voices. A thought is faint, and its paragraphs run together. */
@@ -700,7 +706,7 @@ function enter(wait = false) {
   if (!text) return;
   history.push(text);
   back = 0;
-  scroll(); // the transcript follows again
+  top = undefined; // the transcript follows again
   splice(0, typed.length);
   if (wait || hint || !busy()) return queue(hint ?? text);
   prompt(text).catch((error) => note(error.message, red));
@@ -731,8 +737,8 @@ const keys: Record<string, () => unknown> = {
 
 /** What a press of the mouse does, by its button, at a row on screen. */
 const buttons: Record<number, (row: number) => unknown> = {
-  0: (row) => shown[row - 1]?.click?.(), // the left button: what the row does
-  64: () => scroll(Math.max(0, at - scrolled)), // the wheel, up
+  0: (row) => row <= shown && toggle(at + row - 1), // the left button: what the row opens or shuts
+  64: () => scroll(at - scrolled), // the wheel, up
   65: () => scroll(at + scrolled), // the wheel, down
 };
 
@@ -760,7 +766,7 @@ const latest = resume ? (await sessions().catch(fatal)).find((session) => sessio
 await open(latest?.sessionId).catch(fatal);
 
 process.stdin.setRawMode(true).setEncoding("utf8").on("data", press);
-out.on("resize", resize);
+out.on("resize", draw);
 setInterval(() => busy() && draw(), frame); // the mark turns while bee works
 
 if (first) queue(first);
