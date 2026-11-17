@@ -71,7 +71,7 @@ saved variables, and tells the model which names came back. Open files, threads 
 **`~/.bee/agent` is on the Python path.** A module kept there can be imported in any session.
 
 **The model runs the harness** with that tool, by appending lines to the session file. There is no API for it, and
-the prompt only says where the file is. The harness writes each reply and its results after whatever the reply's code
+the prompt only says where the file is and how it chains. The harness writes each reply and its results after whatever the reply's code
 appended, so the model continues from its own line. This is how it can compact its context, rewind, or change a setting.
 
 **The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model

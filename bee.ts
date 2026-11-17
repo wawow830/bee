@@ -108,7 +108,7 @@ const PYTHON = {
 const prompt = (cwd: string, path: string) => `\nYou are an agent in the bee harness.
 cwd: ${cwd}
 session: ${path}
-Your context is the session file. You can append to it.
+Your context is the session file, followed by parent from its last line. You can append to it.
 
 ${instructions(cwd)}`.trim();
 
