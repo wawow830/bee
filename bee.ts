@@ -73,8 +73,8 @@ const SHOWN = 12_000; // characters of output the model sees per call
 const BASH = {
   name: "bash",
   description:
-    "Runs a command in a new bash, which starts in the working directory. Returns what it wrote to stdout and " +
-    `stderr, cut to ${SHOWN.toLocaleString("en")} characters, or the image it wrote.`,
+    "Runs a command in a new bash in the working directory. cd does not persist between calls. Returns what it " +
+    `wrote to stdout and stderr, cut to ${SHOWN.toLocaleString("en")} characters, or the image it wrote.`,
   parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
 };
 
