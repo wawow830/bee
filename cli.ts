@@ -60,6 +60,7 @@ let at = 0; // how many rows the cursor is below the top of what is redrawn
 let options: { id: string; currentValue: string; options: { value: string }[] }[] = [];
 const running = new Map<string, string>(); // the code of the calls bee is waiting on
 const queued: string[] = []; // sent while bee works, waiting their turn
+const history: string[] = []; // what you have said, here and in the sessions opened, for Up to recall
 
 const up = (rows: number) => (rows ? `\x1b[${rows}A` : "");
 const clear = () => "\r" + up(at) + "\x1b[J";
@@ -126,7 +127,10 @@ function note(text: string, look = gray) {
 }
 
 const updates: Record<string, (update: any) => void> = {
-  user_message_chunk: ({ content }) => user(content.text),
+  user_message_chunk: ({ content }) => {
+    history.push(content.text);
+    user(content.text);
+  },
   agent_message_chunk: ({ content }) => stream(content.text),
   agent_thought_chunk: ({ content }) => {
     thought += content.text;
@@ -193,10 +197,10 @@ const sessions = async (): Promise<Session[]> => (await call("session/list", { c
 
 /** Open the session named, showing what was said in it, or else a new one. */
 async function open(id?: string) {
+  usage = "";
   const opened = await call(id ? "session/load" : "session/new", { sessionId: id, cwd, mcpServers: [] });
   sessionId = id ?? opened.sessionId;
   options = opened.configOptions;
-  usage = "";
 }
 
 /** Send bee a prompt, and wait for its turn to end. */
@@ -216,7 +220,7 @@ async function prompt(text: string) {
 // So does every other setting bee has.
 async function set(id: string, wanted = "") {
   const option = options.find((option) => option.id === id);
-  if (!option) return note([...options.map((option) => "/" + option.id), "/session"].join("  "));
+  if (!option) return note([...options.map((option) => "/" + option.id), "/session", "/new"].join("  "));
   const values = option.options.map((choice) => choice.value);
   const exact = values.filter((value) => value === wanted || value.split("/").at(-1) === wanted);
   const found = exact.length ? exact : values.filter((value) => wanted && value.includes(wanted));
@@ -239,8 +243,10 @@ async function reopen(wanted: string) {
 }
 
 function command(text: string) {
-  const [name, wanted] = text.slice(1).split(/\s+/);
-  return name === "session" ? reopen(text.slice("/session".length).trim()) : set(name, wanted);
+  const [name, ...words] = text.slice(1).split(/\s+/);
+  if (name === "new") return open().then(() => note("New session."));
+  if (name === "session") return reopen(words.join(" "));
+  return set(name, words[0]);
 }
 
 let last: Promise<unknown> = Promise.resolve(); // the last thing you sent, done: each waits for the one before
@@ -261,7 +267,6 @@ await open(latest?.sessionId).catch(fatal);
 
 // ── Keyboard ────────────────────────────────────────────────────────────────
 
-const history: string[] = [];
 let back = 0; // how many prompts Up has gone back
 
 /** Put `text` where the prompt runs `from` to `to`, and the cursor after it. */
@@ -273,6 +278,10 @@ function splice(from: number, to: number, text = "") {
 function move(to: number) {
   cursor = Math.max(0, Math.min(typed.length, to));
 }
+
+const wordBefore = () => typed.slice(0, cursor).search(/\S*\s*$/); // where the word before the cursor starts
+const wordAfter = () => cursor + typed.slice(cursor).match(/^\s*\S*/)![0].length; // and the one after it ends
+const stop = () => send({ method: "session/cancel", params: { sessionId } });
 
 function recall(step: number) {
   back = Math.max(0, Math.min(history.length, back + step));
@@ -293,8 +302,11 @@ const keys: Record<string, () => unknown> = {
   "\x1b\r": () => splice(cursor, cursor, "\n"), // Alt-Enter
   "\x7f": () => splice(Math.max(0, cursor - 1), cursor), // Backspace
   "\x1b[3~": () => splice(cursor, cursor + 1), // Delete
-  "\x17": () => splice(typed.slice(0, cursor).search(/\S*\s*$/), cursor), // Ctrl-W: the word before the cursor
-  "\x15": () => splice(0, cursor), // Ctrl-U
+  "\x04": () => (typed ? splice(cursor, cursor + 1) : quit()), // Ctrl-D, which quits on an empty line
+  "\x17": () => splice(wordBefore(), cursor), // Ctrl-W and Alt-Backspace: the word before the cursor
+  "\x1b\x7f": () => splice(wordBefore(), cursor),
+  "\x15": () => splice(0, cursor), // Ctrl-U and Ctrl-K: all before the cursor, and all after it
+  "\x0b": () => splice(cursor, typed.length),
   "\x01": () => move(0), // Ctrl-A, and Home as terminals send it
   "\x1b[H": () => move(0),
   "\x1b[1~": () => move(0),
@@ -303,10 +315,14 @@ const keys: Record<string, () => unknown> = {
   "\x1b[4~": () => move(typed.length),
   "\x1b[D": () => move(cursor - 1), // Left and Right
   "\x1b[C": () => move(cursor + 1),
+  "\x1b[1;5D": () => move(wordBefore()), // Ctrl-Left and Ctrl-Right, and Alt-B and Alt-F: a word at a time
+  "\x1b[1;5C": () => move(wordAfter()),
+  "\x1bb": () => move(wordBefore()),
+  "\x1bf": () => move(wordAfter()),
   "\x1b[A": () => recall(1), // Up and Down
   "\x1b[B": () => recall(-1),
-  "\x1b": () => busy && send({ method: "session/cancel", params: { sessionId } }), // Esc
-  "\x03": () => (typed ? splice(0, typed.length) : quit()), // Ctrl-C
+  "\x1b": () => busy && stop(), // Esc
+  "\x03": () => (typed ? splice(0, typed.length) : busy ? stop() : quit()), // Ctrl-C clears, else stops, else quits
 };
 
 let pasting = false; // between the marks a terminal puts around a paste

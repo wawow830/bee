@@ -178,10 +178,15 @@ async function ask(sid: string, signal: AbortSignal): Promise<AssistantMessage> 
     if (event.type === "thinking_delta") say(sid, "agent_thought", event.delta);
   }
   const reply = await stream.result();
-  const { input, output, cacheRead, cacheWrite } = reply.usage;
-  const used = input + output + cacheRead + cacheWrite; // tokens in the conversation, as the model counted them
-  update(sid, { sessionUpdate: "usage_update", used, size: model.contextWindow });
+  usage(sid, reply);
   return reply;
+}
+
+/** How full the context is: the tokens in the conversation, as the model counted them in a reply. */
+function usage(sid: string, reply: AssistantMessage) {
+  const { input, output, cacheRead, cacheWrite } = reply.usage;
+  const size = settings(read(sid)).model.contextWindow;
+  update(sid, { sessionUpdate: "usage_update", used: input + output + cacheRead + cacheWrite, size });
 }
 
 const user = (content: UserMessage["content"]): UserMessage => ({ role: "user", content, timestamp: Date.now() });
@@ -349,7 +354,12 @@ const parts = (blocks: any[]): UserMessage["content"] =>
 
 const running = new Map<string, AbortController>();
 
-const open = (sessionId: string) => ({ sessionId, configOptions: options(sessionId) });
+/** A session the editor opens, and how full its context was at the last reply. */
+function open(sessionId: string) {
+  const last = chain(read(sessionId)).findLast((message) => message.role === "assistant");
+  if (last) usage(sessionId, last);
+  return { sessionId, configOptions: options(sessionId) };
+}
 
 const handlers: Record<string, (params: any) => unknown> = {
   initialize: () => ({

@@ -45,10 +45,11 @@ bee -c         # continue the latest session here
 bee "…"        # start with a prompt
 ```
 
-Enter sends, Alt-Enter is a new line, Up and Down recall, Esc stops a turn, Ctrl-C clears or quits. Ctrl-A, Ctrl-E,
-Ctrl-W and Ctrl-U edit as in a shell. `/model` and `/thinking` list their values; `/model <id>` sets one, and
-`/model opus` the one whose id has `opus` in it. `/session` lists the other sessions here, and `/session <words>` opens the
-one with them in its title.
+Enter sends, Alt-Enter is a new line, Up and Down recall what you said in the session, Esc stops a turn, Ctrl-C clears,
+stops or quits. The rest edit as in a shell: Ctrl-A, Ctrl-E, Ctrl-K, Ctrl-U, Ctrl-W, Ctrl-D, Alt-Backspace, and Ctrl-Left
+and Ctrl-Right. `/model` and `/thinking` list their values; `/model <id>` sets one, and `/model opus` the one whose id has `opus`
+in it. `/session` lists the other sessions here, `/session <words>` opens the one with them in its title, and `/new`
+starts another.
 
 ## How it works
 
