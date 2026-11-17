@@ -41,10 +41,8 @@ console.log = console.error; // stdout carries the protocol and nothing else
 const failure = (code: number, message: string) => Object.assign(new Error(message), { code });
 
 // ── Sessions ────────────────────────────────────────────────────────────────
-// A session is a file of lines, and its messages are the conversation. The
-// model can edit the file like any other, so compacting and rewinding are
-// edits. The file is the whole interface, and nothing about a session lives
-// anywhere else.
+// A session is a file of lines, written as things happen, and its messages are
+// the conversation. Nothing about a session lives anywhere else.
 
 type Settings = { model?: string; thinking?: string; cache?: string };
 type Line = Settings & { message?: Message; cwd?: string };
@@ -100,7 +98,7 @@ function create(cwd: string): string {
   const defaults: Settings = existsSync(SETTINGS) ? JSON.parse(readFileSync(SETTINGS, "utf8")) : {};
   const message: SystemMessage = {
     role: "system",
-    content: system(cwd, file(sid)),
+    content: system(cwd),
     toolsAdded: [BASH],
     timestamp: Date.now(),
   };
@@ -110,16 +108,7 @@ function create(cwd: string): string {
 
 /** The conversation: the messages in the file. */
 function conversation(lines: Line[]): Message[] {
-  // A reply is one the model returned, with its usage. One written into the file by hand is not a reply.
-  const returned = (message: Message) => message.role !== "assistant" || message.usage;
-  const messages = lines.flatMap((line) => (line.message && returned(line.message) ? [line.message] : []));
-  // A result follows its call, and one whose call is not in the conversation is not in it either.
-  const results = messages.filter((message) => message.role === "toolResult");
-  const answers = ({ content }: AssistantMessage) =>
-    results.filter((result) => content.some((block) => block.type === "toolCall" && block.id === result.toolCallId));
-  return messages.flatMap<Message>((message) =>
-    message.role === "toolResult" ? [] : message.role === "assistant" ? [message, ...answers(message)] : [message],
-  );
+  return lines.flatMap((line) => (line.message ? [line.message] : []));
 }
 
 // ── The model ───────────────────────────────────────────────────────────────
@@ -132,10 +121,8 @@ const BASH = {
   parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
 };
 
-const system = (cwd: string, path: string) => `
+const system = (cwd: string) => `
 You are an agent in the bee harness.
-session: ${path}
-Your context is the messages in the session file, one per line, and you can edit it. Lines are written as they happen: a reply when it ends, a result when its command does. A reply the model did not return, or a result whose call is not in the file, is left out.
 
 ${instructions(cwd)}`.trim();
 
@@ -223,12 +210,10 @@ async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<str
       }
       const reply = await ask(sid, signal);
       const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
-      // Its thinking is shown as it comes, and not kept: a request with the model's thinking in its input is refused.
-      append(sid, { message: { ...reply, content: reply.content.filter((block) => block.type !== "thinking") } });
+      append(sid, { message: reply });
       for (const call of calls) if (!signal.aborted) append(sid, { message: await run(sid, call, signal) });
       if (reply.stopReason === "error") throw new Error(reply.errorMessage);
-      // The model is asked again while the conversation ends with something other than its own reply.
-      if (conversation(read(sid)).at(-1)?.role === "assistant" && !said.length && !signal.aborted)
+      if (!calls.length && !said.length && !signal.aborted)
         return reply.stopReason === "length" ? "max_tokens" : "end_turn";
     }
   } finally {
