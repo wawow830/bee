@@ -15,8 +15,10 @@ if (args.some((arg) => arg.startsWith("-") && arg !== "-c")) {
 // ── Look ────────────────────────────────────────────────────────────────────
 
 const out = process.stdout;
-const color = (code: number) => (text: string) => `\x1b[38;5;${code}m${text}\x1b[39m`;
-const [amber, light, gray, dark, red] = [214, 250, 245, 239, 203].map(color);
+// Colours by value, not by number: a theme can make any number another colour.
+const color = (rgb: number) => (text: string) =>
+  `\x1b[38;2;${rgb >> 16};${(rgb >> 8) & 255};${rgb & 255}m${text}\x1b[39m`;
+const [amber, light, gray, dark, red] = [0xffaf00, 0xbcbcbc, 0x8a8a8a, 0x4e4e4e, 0xff5f5f].map(color);
 const bold = (text: string) => `\x1b[1m${text}\x1b[22m`;
 const italic = (text: string) => `\x1b[3m${text}\x1b[23m`;
 
