@@ -22,19 +22,22 @@ const resume = args.includes("-c");
 const first = args.filter((arg) => arg !== "-c").join(" ").trim();
 
 // ── Look ────────────────────────────────────────────────────────────────────
+// Each colour means one thing. Amber is where you type. Words are in the terminal's own colour, code in gray, and
+// red is what failed. All else is dark: marks, hints, and what this terminal says for itself.
 
 const out = process.stdout;
 
 type Paint = (text: string) => string;
 
+/** A look that begins with `on` and ends with `off`. Nothing stays nothing, so a blank row stays blank. */
+const style = (on: string, off: string): Paint => (text) => text && `\x1b[${on}m${text}\x1b[${off}m`;
 // Colours by value, not by number: a theme can make any number another colour.
-const color = (rgb: number): Paint => (text) =>
-  `\x1b[38;2;${rgb >> 16};${(rgb >> 8) & 255};${rgb & 255}m${text}\x1b[39m`;
+const color = (rgb: number) => style(`38;2;${rgb >> 16};${(rgb >> 8) & 255};${rgb & 255}`, "39");
 const [amber, gray, dark, red] = [0xffaf00, 0x8a8a8a, 0x4e4e4e, 0xff5f5f].map(color);
-const bold: Paint = (text) => `\x1b[1m${text}\x1b[22m`;
+const bold = style("1", "22");
 
 const pad = "  "; // every row begins with it, or with a mark as wide
-const mark = dark("› "); // what you said begins with it
+const mark = "› "; // what you say begins with it
 const spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"; // the mark, while bee works
 const frame = 80; // how many milliseconds each turn of the spinner shows
 const choices = 8; // how many hints are shown
@@ -46,20 +49,61 @@ const room = (indent = pad.length) => out.columns - 1 - indent;
 const cut = (text: string, row: string) =>
   text.split("\n").flatMap((line) => line.match(new RegExp(row, "g")) ?? [""]);
 
-/** Rows no wider than `size`, broken at a space where there is one. */
-const wrap = (text: string, size = room()) => cut(text, `.{1,${size}}(?=\\s|$)\\s*|.{1,${size}}`);
+/** Rows no wider than `size`, broken after a space where there is one. Each keeps the spaces it was broken at. */
+const fill = (text: string, size: number) => cut(text, `.{1,${size}}(?=\\s|$)\\s*|.{1,${size}}`);
 
-/** As much markdown as a row can show by itself. */
-const markdown: Paint = (row) =>
-  row
-    .replace(/^#+ (.*)/, (_, text) => bold(text))
-    .replace(/^(\s*)[-*] /, (_, indent) => indent + gray("• "))
-    .replace(/\*\*(.+?)\*\*/g, (_, text) => bold(text))
-    .replace(/`([^`]+)`/g, (_, text) => amber(text));
+/** Rows no wider than `size`, broken at a space where there is one. */
+const wrap = (text: string, size = room()) => fill(text, size).map((row) => row.trimEnd());
+
+// A look is which marks of markdown hold: bold, code, or both.
+const [strong, code] = [1, 2];
+const looks: Paint[] = [(text) => text, bold, gray, (text) => bold(gray(text))];
+
+/** Where a line of code begins or ends. */
+const fence = (line: string) => /^\s*```/.test(line);
+
+/**
+ * A line of a reply as rows, its markdown shown as it looks. A list item's rows hang under its text. Between fences,
+ * `inCode`, the line is shown as it is. Unless the line is `whole`, a mark not yet closed is taken to be closed later.
+ */
+function markdown(line: string, { inCode = false, whole = true } = {}): string[] {
+  if (fence(line)) return [];
+  if (inCode) return wrap(line).map(gray);
+  const heading = line.match(/^#+\s+(.*)/);
+  const [, indent = "", item = "", body = line] = heading ? [] : (line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)/) ?? []);
+  const lead = item && indent + (/\d/.test(item) ? item : "•") + " ";
+  const tokens = (heading?.[1] ?? body).match(/\*\*|`|[^]/g) ?? [];
+  // Once the line is whole, a mark with none after it to close it is only characters.
+  const unpaired = new Set<number>();
+  for (const mark of ["`", "**"]) {
+    const at = tokens.flatMap((token, n) => (token === mark ? [n] : []));
+    if (whole && at.length % 2) unpaired.add(at.at(-1)!);
+  }
+  let text = "";
+  let look = heading ? strong : 0;
+  const each: number[] = []; // the look of each character of `text`
+  tokens.forEach((token, n) => {
+    if (token === "`" && !unpaired.has(n)) look ^= code;
+    else if (token === "**" && !(look & code) && !unpaired.has(n)) look ^= strong;
+    else for (const character of token) (text += character), each.push(look);
+  });
+  let from = 0;
+  return fill(text, room(pad.length + lead.length)).map((row, n) => {
+    const shown = row.trimEnd();
+    let painted = "";
+    for (let start = 0, end = 1; start < shown.length; end++) {
+      if (end < shown.length && each[from + end] === each[from + start]) continue;
+      painted += looks[each[from + start]](shown.slice(start, end));
+      start = end;
+    }
+    from += row.length;
+    return (n ? " ".repeat(lead.length) : dark(lead)) + painted;
+  });
+}
 
 /** The code bee runs, as one row: its first line, and `…` if there is more. */
-function tool(code: string, look = dark) {
-  const [line, ...more] = code.trim().split("\n");
+function tool(text: string, look = gray) {
+  const [line, ...more] = text.trim().split("\n");
   const row = line.length > room() || more.length ? line.slice(0, room() - 1) + "…" : line;
   return pad + look(row);
 }
@@ -73,8 +117,11 @@ type Option = { id: string; currentValue: string; options: { value: string }[] }
 let typed = ""; // the prompt
 let cursor = 0; // where the cursor is in it
 let tabbed = ""; // what you typed, while Tab goes through what fits it
-let reply = ""; // the row bee is writing, until it is full
-let begun = false; // whether rows of that reply are printed already
+let reply = ""; // the line bee is writing, until it ends
+let held = 0; // how many rows of that line are printed already: all but the last, which may grow
+let begun = false; // whether rows of the reply are printed already
+let blank = false; // whether a blank row waits, to be printed only if more of the reply comes after it
+let inCode = false; // whether the reply is between fences
 let usage = ""; // how full its context is
 let options: Option[] = []; // the session's settings
 let prompts = 0; // how many bee has not answered: a turn is under way while there are any
@@ -91,18 +138,19 @@ const clear = () => "\r" + up(at) + "\x1b[J";
 
 /** What bee is doing: the row it is writing and the code it is running, and what waits. */
 function activity() {
-  const code = [...running.values()].map((code) => tool(code));
+  const writing = markdown(reply, { inCode, whole: false }).slice(held).filter((row) => row.trim());
+  const code = [...running.values()].map((text) => tool(text));
   return [
-    ...(reply.trim() ? [...(begun ? [] : [""]), pad + markdown(reply)] : []),
+    ...(writing.length ? [...(begun && !blank ? [] : [""]), ...writing.map((row) => pad + row)] : []),
     ...(code.length ? [...(ran ? [] : [""]), ...code] : []),
-    ...queued.map((text) => dark("› " + text.split("\n")[0].slice(0, room()))),
+    ...queued.map((text) => dark(mark + text.split("\n")[0].slice(0, room()))),
   ];
 }
 
 /** What a command is set to, shown beside it as a hint. */
 function current(id: string) {
   if (id === "session") return usage && `${usage} of context`;
-  return options.find((option) => option.id === id)?.currentValue.split("/").at(-1) ?? "";
+  return options.find((option) => option.id === id)?.currentValue ?? "";
 }
 
 /** Redraw, after printing any rows that are finished. */
@@ -115,20 +163,22 @@ function draw(finished: string[] = []) {
   const last = Math.max(choices, fits.indexOf(typed) + 1); // the hints shown end at the one Tab is on
   const shown = fits.slice(last - choices, last);
   const from = (tabbed || typed).match(/^\/\S*\s+/)?.[0].length ?? 0; // each hint is shown from where it differs
-  const widest = Math.max(...shown.map((hint) => hint.length));
-  const below = input.length - before.length + shown.length;
+  const more = fits.length - shown.length;
+  const widest = Math.max(...shown.map((hint) => hint.trimEnd().length));
+  const below = input.length - before.length + shown.length + (more ? 1 : 0);
   const turning = spinner[Math.floor(Date.now() / frame) % spinner.length];
   const rows = [
     ...finished,
     ...activity(),
     "",
-    `${amber(busy() ? turning : "›")} ${input[0]}`,
+    amber(busy() ? turning + " " : mark) + input[0],
     ...input.slice(1).map((row) => pad + row),
     ...shown.map((hint) => {
       const named = hint.match(/^\/(\S+) $/)?.[1]; // a command, which is shown with what it is set to
-      const text = (named ? hint.padEnd(widest) + pad + current(named) : hint).slice(from, room()).trimEnd();
+      const text = (named ? hint.trimEnd().padEnd(widest) + pad + current(named) : hint).slice(from, room()).trimEnd();
       return pad + " ".repeat(from) + (hint === typed ? text : dark(text)); // the one Tab is on is in the prompt
     }),
+    ...(more ? [pad + " ".repeat(from) + dark(`${more} more`)] : []),
   ];
   // One frame: erase what was drawn, draw, and put the cursor where it is in the prompt.
   const column = pad.length + before.at(-1)!.length + 1;
@@ -143,31 +193,48 @@ function print(rows: string[], apart = true) {
   ran &&= !rows.length;
 }
 
-/** A reply arrives in pieces. Its rows are printed as they fill, and the last waits for more. */
-function stream(text: string) {
-  const rows = wrap(reply + text);
-  reply = rows.pop()!;
-  print(rows.map((row) => pad + markdown(row)), !begun);
-  begun ||= rows.length > 0;
+/** Print rows of the reply. Blank rows between its rows are one, and there are none around it. */
+function show(rows: string[]) {
+  const shown: string[] = [];
+  for (const row of rows) {
+    if (!row.trim() && !inCode) blank = begun || shown.length > 0;
+    else shown.push(...(blank ? [""] : []), pad + row), (blank = false);
+  }
+  print(shown, !begun);
+  begun ||= shown.length > 0;
 }
 
-/** The reply is over, if there was one: print the row that was waiting. */
+/** A reply arrives in pieces. Its rows are printed as they fill, and the last waits for more. */
+function stream(text: string) {
+  const lines = (reply + text).split("\n");
+  reply = lines.pop()!;
+  const rows: string[] = [];
+  for (const line of lines) {
+    rows.push(...markdown(line, { inCode }).slice(held));
+    held = 0;
+    if (fence(line)) inCode = !inCode;
+  }
+  const writing = markdown(reply, { inCode, whole: false });
+  show([...rows, ...writing.slice(held, -1)]);
+  held = Math.max(held, writing.length - 1);
+}
+
+/** The reply is over, if there was one: print what was waiting. */
 function end() {
-  const rest = reply.trim() ? [pad + markdown(reply)] : [];
-  const apart = !begun;
-  reply = "";
-  begun = false;
-  print(rest, apart);
+  const rest = markdown(reply, { inCode }).slice(held);
+  [reply, held] = ["", 0];
+  show(rest);
+  [begun, blank, inCode] = [false, false, false];
 }
 
 /** What you said. */
 function user(text: string) {
   end();
-  print(wrap(text).map((row, n) => (n ? pad : mark) + row));
+  print(wrap(text).map((row, n) => (n ? pad : dark(mark)) + row));
 }
 
 /** What this terminal has to say for itself. */
-function note(text: string, look = gray) {
+function note(text: string, look = dark) {
   end();
   print(wrap(text).map((row) => pad + look(row)));
 }
@@ -200,7 +267,7 @@ const updates: Record<string, (update: Update) => void> = {
     if (status !== "completed" && status !== "failed") return;
     const code = running.get(toolCallId) ?? "";
     running.delete(toolCallId);
-    print([tool(code, status === "failed" ? red : dark)], !ran);
+    print([tool(code, status === "failed" ? red : gray)], !ran);
     ran = true;
   },
   usage_update: ({ used, size }) => {

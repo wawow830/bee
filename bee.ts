@@ -95,7 +95,7 @@ const beginning = (cwd: string): Line => ({
   cwd,
   message: {
     role: "system",
-    content: `You are an agent in the bee harness.\n\n${instructions(cwd)}`.trim(),
+    content: `\nYou are an agent in the bee harness.\n\n${instructions(cwd)}`.trim(),
     toolsAdded: [BASH],
     timestamp: Date.now(),
   },
