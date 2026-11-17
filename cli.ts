@@ -50,6 +50,7 @@ function tool(code: string, output = "", tint = gray) {
 
 let typed = ""; // the prompt, and where the cursor is in it
 let cursor = 0;
+let tabbed = ""; // what you typed, while Tab goes through what fits it
 let reply = ""; // the row bee is writing, until it is full
 let begun = false; // whether rows of that reply are printed already
 let thought = ""; // what bee is thinking
@@ -72,7 +73,9 @@ function draw(finished: string[] = []) {
   const chop = (text: string) => cut(text, `.{1,${size}}`);
   const input = chop(typed);
   const before = chop(typed.slice(0, cursor)); // the cursor is at the end of these rows
-  const shown = hints(typed).slice(0, 8);
+  const fits = hints(tabbed || typed);
+  const chosen = Math.max(0, fits.indexOf(typed)); // the one Tab is on, or else the first
+  const shown = fits.slice(Math.max(0, chosen - 7), Math.max(8, chosen + 1));
   const below = input.length - before.length + shown.length;
   const mark = busy ? "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[Math.floor(Date.now() / 80) % 10] : "›";
   const thinking = thought.trim().split("\n").at(-1)!.slice(0, out.columns - 3);
@@ -85,7 +88,7 @@ function draw(finished: string[] = []) {
     "",
     `${amber(mark)} ${input[0].padEnd(size)}  ${dark(status)}`,
     ...input.slice(1).map((row) => "  " + row),
-    ...shown.map((hint, n) => "  " + (n ? dark : gray)(hint.slice(0, out.columns - 3))),
+    ...shown.map((hint) => "  " + (hint === fits[chosen] ? gray : dark)(hint.slice(0, out.columns - 3))),
   ];
   // One frame: erase what was drawn, draw, and put the cursor where it is in the prompt.
   out.write(`\x1b[?2026h${clear()}${rows.join("\n")}${up(below)}\x1b[${3 + before.at(-1)!.length}G\x1b[?2026l`);
@@ -221,7 +224,8 @@ async function prompt(text: string) {
 
 // ── Commands ────────────────────────────────────────────────────────────────
 // `/model`, `/thinking` and `/session` each take one of their values: the one named, or else those with what you
-// typed in them. What fits is shown under the prompt. Tab takes the first, and so does Enter once only one fits.
+// typed in them. What fits is shown under the prompt. Tab goes through it, and Enter takes the first once only one
+// fits.
 
 let others: Session[] = []; // the other sessions here, latest first
 
@@ -301,9 +305,11 @@ function recall(step: number) {
   splice(0, typed.length, back ? history.at(-back) : "");
 }
 
+/** Take the first of what fits, or at the next Tab the one after. */
 function tab() {
-  const [hint] = hints(typed);
-  if (hint) splice(0, typed.length, hint);
+  const fits = hints(tabbed || typed);
+  if (fits.length > 1) tabbed ||= typed; // with only one, the next Tab goes on from it
+  if (fits.length) splice(0, typed.length, fits[(fits.indexOf(typed) + 1) % fits.length]);
 }
 
 function enter() {
@@ -343,6 +349,7 @@ let pasting = false; // between the marks a terminal puts around a paste
 
 process.stdin.setRawMode(true).setEncoding("utf8").on("data", (data: string) => {
   for (const [key] of data.matchAll(/\x1b\[[\d;]*[^\d;]|\x1b[^]|[^]/g)) {
+    if (key !== "\t") tabbed = "";
     if (/^\x1b\[20[01]~$/.test(key)) pasting = key === "\x1b[200~";
     else if (pasting) splice(cursor, cursor, key === "\r" ? "\n" : key);
     else if (keys[key]) keys[key]();

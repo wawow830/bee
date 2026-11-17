@@ -49,8 +49,8 @@ Enter sends, Alt-Enter is a new line, Up and Down recall what you said in the se
 stops or quits. Ctrl-A, Ctrl-E, Ctrl-W and Ctrl-U edit as in a shell.
 
 `/model`, `/thinking` and `/session` each take a value: `/model opus` is the model with `opus` in its id, and
-`/session` is `new` or the title of another session here. What fits is shown under the prompt as you type. Tab takes
-the first, and Enter does too once only one fits.
+`/session` is `new` or the title of another session here. What fits is shown under the prompt as you type. Tab goes
+through it, and Enter takes the first once only one fits.
 
 ## How it works
 
