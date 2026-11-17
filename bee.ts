@@ -115,10 +115,16 @@ function create(cwd: string): string {
 
 /** The conversation: the messages from line 0 to the last line, by way of each line's parent. */
 function chain(lines: Line[]): Message[] {
-  const messages = [];
+  const messages: Message[] = [];
   for (let line = lines.at(-1); line; line = lines[line.parent ?? -1])
-    if (line.message) messages.push(line.message);
-  return messages.reverse();
+    if (line.message) messages.unshift(line.message);
+  // A result follows its call, and one whose call is not in the conversation is not in it either.
+  const results = messages.filter((message) => message.role === "toolResult");
+  const answers = ({ content }: AssistantMessage) =>
+    results.filter((result) => content.some((block) => block.type === "toolCall" && block.id === result.toolCallId));
+  return messages.flatMap<Message>((message) =>
+    message.role === "toolResult" ? [] : message.role === "assistant" ? [message, ...answers(message)] : [message],
+  );
 }
 
 // ── The model ───────────────────────────────────────────────────────────────
@@ -134,7 +140,7 @@ const BASH = {
 const system = (cwd: string, path: string) => `
 You are an agent in the bee harness.
 session: ${path}
-Each line of the session file is {parent, message}, where parent is the number of the line it follows. Your context is the messages from the last line back to line 0. Each reply is written after its commands end.
+Each line of the session file is {parent, message}, where parent is the number of the line it follows. Your context is the messages from the last line back to line 0.
 
 ${instructions(cwd)}`.trim();
 
@@ -202,21 +208,34 @@ function usage(sid: string, reply: AssistantMessage) {
 
 const user = (content: UserMessage["content"]): UserMessage => ({ role: "user", content, timestamp: Date.now() });
 
-/** The loop: ask, run what it asks for, repeat until it has nothing to run. */
-async function turn(sid: string, signal: AbortSignal): Promise<string> {
-  for (;;) {
-    const reply = await ask(sid, signal);
-    const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
-    const results = [];
-    for (const call of calls) if (!signal.aborted) results.push(await run(sid, call, signal));
-    // Written only now, so that the exchange follows any line its own commands appended.
-    for (const message of [reply, ...results]) append(sid, { message });
-    if (reply.stopReason === "error") throw new Error(reply.errorMessage);
-    if (signal.aborted) {
-      append(sid, { message: user("[The user interrupted.]") });
-      return "cancelled";
+/** A turn under way: how to stop it, what the user has said that it has not read yet, and how it ends. */
+type Turn = { abort: AbortController; said: UserMessage[]; done?: Promise<string> };
+
+/**
+ * The loop: read what the user said, ask, run what it asks for, repeat until it has nothing to run and nothing more
+ * was said. A prompt sent during a turn joins it, so the model reads it once the commands it is running end.
+ */
+async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<string> {
+  try {
+    for (;;) {
+      for (const message of said.splice(0)) {
+        append(sid, { message });
+        say(sid, "user_message", plain(message.content));
+      }
+      if (signal.aborted) {
+        append(sid, { message: user("[The user interrupted.]") });
+        return "cancelled";
+      }
+      const reply = await ask(sid, signal);
+      const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
+      append(sid, { message: reply });
+      for (const call of calls) if (!signal.aborted) append(sid, { message: await run(sid, call, signal) });
+      if (reply.stopReason === "error") throw new Error(reply.errorMessage);
+      if (!calls.length && !said.length && !signal.aborted)
+        return reply.stopReason === "length" ? "max_tokens" : "end_turn";
     }
-    if (!calls.length) return reply.stopReason === "length" ? "max_tokens" : "end_turn";
+  } finally {
+    running.delete(sid); // in the same step as the last look at what was said, so nothing said is left behind
   }
 }
 
@@ -375,7 +394,7 @@ const parts = (blocks: any[]): UserMessage["content"] =>
         : { type: "text", text: block.text ?? block.uri ?? "" },
   );
 
-const running = new Map<string, AbortController>();
+const running = new Map<string, Turn>();
 
 /** A session the editor opens, and how full its context was at the last reply. */
 function open(sessionId: string) {
@@ -408,16 +427,17 @@ const handlers: Record<string, (params: any) => unknown> = {
     append(sessionId, { [configId]: value });
     return { configOptions: options(sessionId) };
   },
-  "session/cancel": ({ sessionId }) => running.get(sessionId)?.abort(),
+  "session/cancel": ({ sessionId }) => running.get(sessionId)?.abort.abort(),
   "session/prompt": async ({ sessionId, prompt }) => {
-    const abort = new AbortController();
-    running.set(sessionId, abort);
-    try {
-      append(sessionId, { message: user(parts(prompt)) });
-      return { stopReason: await turn(sessionId, abort.signal) };
-    } finally {
-      running.delete(sessionId);
+    const message = user(parts(prompt));
+    let under = running.get(sessionId);
+    if (under) under.said.push(message);
+    else {
+      under = { abort: new AbortController(), said: [message] };
+      running.set(sessionId, under);
+      under.done = turn(sessionId, under);
     }
+    return { stopReason: await under.done };
   },
 };
 

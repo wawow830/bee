@@ -48,7 +48,7 @@ function tool(code: string, output = "", tint = gray) {
 
 // ── Screen ──────────────────────────────────────────────────────────────────
 // Finished rows are printed once. Below them the rest is redrawn: what bee is writing, running or thinking,
-// what you have queued, and the prompt.
+// what you have sent into the turn and what you have queued, and the prompt.
 
 let typed = ""; // the prompt, and where the cursor is in it
 let cursor = 0;
@@ -57,14 +57,16 @@ let reply = ""; // the row bee is writing, until it is full
 let begun = false; // whether rows of that reply are printed already
 let thought = ""; // what bee is thinking
 let usage = ""; // how full its context is
-let busy = false; // a turn is under way
+let prompts = 0; // how many bee has not answered: a turn is under way while there are any
 let printed = false; // whether anything is, yet
 let at = 0; // how many rows the cursor is below the top of what is redrawn
 let options: { id: string; currentValue: string; options: { value: string }[] }[] = [];
 const running = new Map<string, string>(); // the code of the calls bee is waiting on
-const queued: string[] = []; // sent while bee works, waiting their turn
+const steered: string[] = []; // sent into the turn under way, until bee reads them
+const queued: string[] = []; // waiting for the turn to end
 const history: string[] = []; // what you have said, here and in the sessions opened, for Up to recall
 
+const busy = () => prompts > 0;
 const up = (rows: number) => (rows ? `\x1b[${rows}A` : "");
 const clear = () => "\r" + up(at) + "\x1b[J";
 
@@ -80,14 +82,15 @@ function draw(finished: string[] = []) {
   const shown = fits.slice(Math.max(0, chosen - 7), Math.max(8, chosen + 1));
   const from = (tabbed || typed).match(/^\/\S*\s+/)?.[0].length ?? 0; // each hint is shown from where it differs
   const below = input.length - before.length + shown.length;
-  const mark = busy ? "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[Math.floor(Date.now() / 80) % 10] : "›";
+  const mark = busy() ? "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[Math.floor(Date.now() / 80) % 10] : "›";
   const thinking = thought.trim().split("\n").at(-1)!.slice(0, out.columns - 3);
   const rows = [
     ...finished,
     ...(reply.trim() ? [...(begun ? [] : [""]), "  " + markdown(reply)] : []),
     ...[...running.values()].flatMap((code) => ["", ...tool(code)]),
-    ...(busy && thinking ? ["", "  " + gray(italic(thinking))] : []),
-    ...queued.map((text) => dark("› " + text.split("\n")[0].slice(0, out.columns - 3))),
+    ...(busy() && thinking ? ["", "  " + gray(italic(thinking))] : []),
+    ...steered.map((text) => gray(pending(text))),
+    ...queued.map((text) => dark(pending(text))),
     "",
     `${amber(mark)} ${input[0].padEnd(size)}  ${dark(status)}`,
     ...input.slice(1).map((row) => "  " + row),
@@ -100,6 +103,9 @@ function draw(finished: string[] = []) {
   out.write(`\x1b[?2026h${clear()}${rows.join("\n")}${up(below)}\x1b[${3 + before.at(-1)!.length}G\x1b[?2026l`);
   at = rows.length - finished.length - below - 1;
 }
+
+/** A message not yet read, as one row. */
+const pending = (text: string) => "› " + text.split("\n")[0].slice(0, out.columns - 3);
 
 /** Print finished rows, set apart from those before them unless they carry on a reply. */
 function print(rows: string[], apart = true) {
@@ -138,8 +144,11 @@ function note(text: string, look = gray) {
 }
 
 const updates: Record<string, (update: any) => void> = {
+  // bee says what you said once it is in the conversation, and all of it when a session is opened.
   user_message_chunk: ({ content }) => {
-    history.push(content.text);
+    if (loading) history.push(content.text);
+    const at = steered.indexOf(content.text);
+    if (at >= 0) steered.splice(at, 1);
     user(content.text);
   },
   agent_message_chunk: ({ content }) => stream(content.text),
@@ -164,7 +173,7 @@ const updates: Record<string, (update: any) => void> = {
   },
 };
 
-setInterval(() => busy && draw(), 80); // the mark turns while bee works
+setInterval(() => busy() && draw(), 80); // the mark turns while bee works
 
 // ── bee ─────────────────────────────────────────────────────────────────────
 
@@ -203,29 +212,33 @@ type Session = { sessionId: string; title?: string };
 
 const cwd = process.cwd();
 let sessionId = "";
+let loading = false; // while a session opened shows what was said in it
 
 const sessions = async (): Promise<Session[]> => (await call("session/list", { cwd })).sessions;
 
 /** Open the session named, showing what was said in it, or else a new one. */
 async function open(id?: string) {
   usage = "";
-  const opened = await call(id ? "session/load" : "session/new", { sessionId: id, cwd, mcpServers: [] });
+  loading = true;
+  const opened = await call(id ? "session/load" : "session/new", { sessionId: id, cwd, mcpServers: [] }).finally(
+    () => (loading = false),
+  );
   sessionId = id ?? opened.sessionId;
   options = opened.configOptions;
   others = (await sessions()).filter((session) => session.title && session.sessionId !== sessionId);
 }
 
-/** Send bee a prompt, and wait for its turn to end. */
+/** Send bee a prompt, and wait for its turn to end. One sent while a turn is under way joins it. */
 async function prompt(text: string) {
-  user(text);
-  busy = true;
+  prompts++;
   const done = () => {
-    busy = false;
+    if (--prompts) return; // the turn answers each prompt in it
+    steered.length = 0; // what it did not read, if it failed
     thought = "";
     end();
   };
   const { stopReason } = await call("session/prompt", { sessionId, prompt: [{ type: "text", text }] }).finally(done);
-  if (stopReason !== "end_turn") note(stopReason);
+  if (stopReason !== "end_turn" && !prompts) note(stopReason);
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
@@ -276,7 +289,8 @@ async function command(text: string) {
 
 let last: Promise<unknown> = Promise.resolve(); // the last thing you sent, done: each waits for the one before
 
-function submit(text: string) {
+/** Wait for the turn to end, and for what was queued before. */
+function queue(text: string) {
   queued.push(text);
   const next = () => {
     queued.shift();
@@ -318,7 +332,8 @@ function tab() {
   if (fits.length) splice(0, typed.length, fits[(fits.indexOf(typed) + 1) % fits.length]);
 }
 
-function enter() {
+/** Send what is typed: into the turn under way, unless you `wait`, or it is a command. */
+function enter(wait = false) {
   const text = typed.trim();
   const [hint, ...more] = hints(typed);
   if (text.startsWith("/") && (!hint || more.length || hint.endsWith(" "))) return tab(); // not one value yet
@@ -326,12 +341,14 @@ function enter() {
   history.push(text);
   back = 0;
   splice(0, typed.length);
-  submit(hint ?? text);
+  if (wait || hint || !busy()) return queue(hint ?? text);
+  steered.push(text);
+  prompt(text).catch((error) => note(error.message, red));
 }
 
 const keys: Record<string, () => unknown> = {
   "\r": enter,
-  "\t": tab,
+  "\t": () => (typed.trimStart().startsWith("/") ? tab() : enter(true)), // Tab completes a command, or queues
   "\x1b\r": () => splice(cursor, cursor, "\n"), // Alt-Enter
   "\x7f": () => splice(Math.max(0, cursor - 1), cursor), // Backspace
   "\x1b[3~": () => splice(cursor, cursor + 1), // Delete
@@ -347,8 +364,8 @@ const keys: Record<string, () => unknown> = {
   "\x1b[C": () => move(cursor + 1),
   "\x1b[A": () => recall(1), // Up and Down
   "\x1b[B": () => recall(-1),
-  "\x1b": () => busy && stop(), // Esc
-  "\x03": () => (typed ? splice(0, typed.length) : busy ? stop() : quit()), // Ctrl-C clears, else stops, else quits
+  "\x1b": () => busy() && stop(), // Esc
+  "\x03": () => (typed ? splice(0, typed.length) : busy() ? stop() : quit()), // Ctrl-C clears, else stops, else quits
 };
 
 let pasting = false; // between the marks a terminal puts around a paste
@@ -367,5 +384,5 @@ out.write("\x1b[?2004h"); // ask for those marks
 out.on("resize", () => draw());
 
 const first = args.filter((arg) => arg !== "-c").join(" ").trim();
-if (first) submit(first);
+if (first) queue(first);
 else draw();

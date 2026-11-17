@@ -45,8 +45,9 @@ bee -c         # continue the latest session here
 bee "…"        # start with a prompt
 ```
 
-Enter sends, Alt-Enter is a new line, Up and Down recall what you said in the session, Esc stops a turn, Ctrl-C clears,
-stops or quits. Ctrl-A, Ctrl-E, Ctrl-W and Ctrl-U edit as in a shell.
+Enter sends, Alt-Enter is a new line. While bee works, Enter steers: bee reads what you said once the commands it is
+running end, in the same turn. Tab queues it for when the turn is over. Up and Down recall what you said in the
+session, Esc stops a turn, Ctrl-C clears, stops or quits. Ctrl-A, Ctrl-E, Ctrl-W and Ctrl-U edit as in a shell.
 
 `/model`, `/thinking` and `/session` each take a value: `/model opus` is the model with `opus` in its id, and
 `/session` is `new` or the title of another session here. What fits is shown under the prompt as you type. Tab goes
@@ -68,9 +69,11 @@ a summary appended after line 0. A rewind is a line appended after any other. A 
 cut to 20,000 characters. If what it wrote is an image, the model sees the image. The computer is what lasts: files,
 and whatever the command left running.
 
-**The model runs the harness** with that tool, by appending lines to the session file. There is no API for it. The
-prompt says where the file is, what a line is, and that each reply is written after its commands end, so the model
-continues from whatever line they appended. This is how it can compact its context, rewind, or change a setting.
+**The model runs the harness** with that tool, by appending lines to the session file. There is no API for it, and
+the prompt only says where the file is and what a line is. Lines are written as things happen: a reply when it ends,
+each result when its command does. A result follows its call, and one whose call is not in the conversation is not in
+it either, so a command that moves the conversation leaves its own exchange behind. This is how the model can compact
+its context, rewind, or change a setting.
 
 **The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model
 what to do. Instructions are yours, in `AGENTS.md`.
