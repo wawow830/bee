@@ -51,7 +51,7 @@ turn. Alt-Enter queues it for when the turn is over. Ctrl-J is a new line. Up an
 session, Esc stops a turn, Ctrl-C clears, stops or quits. Ctrl-A, Ctrl-E, Ctrl-W and Ctrl-U edit as in a shell.
 
 A turn shows what you said and the last thing that came of it: bee's answer, or while bee works, what it is doing. Click
-either to unfold the work before it. There a thought is its first row and a command its code: click either for the
+what you said, or the answer, to unfold the work before it. There a thought is its first row and a command its code: click either for the
 rest, all of the thought or what the command printed. The wheel scrolls, and Shift-drag selects.
 
 `/model`, `/thinking` and `/session` each take a value: `/model opus` is the model with `opus` in its id, and
