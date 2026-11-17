@@ -140,7 +140,7 @@ const BASH = {
 const system = (cwd: string, path: string) => `
 You are an agent in the bee harness.
 session: ${path}
-Each line of the session file is {parent, message}, where parent is the number of the line it follows. Your context is the messages from the last line back to line 0.
+Each line of the session file is {parent, message}, where parent is the number of the line it follows. Lines are written as they happen: a reply when it ends, a result when its command does. Your context is the messages from the last line back to line 0, each result after its call, and a result whose call is not among them is left out.
 
 ${instructions(cwd)}`.trim();
 
@@ -231,7 +231,8 @@ async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<str
       append(sid, { message: reply });
       for (const call of calls) if (!signal.aborted) append(sid, { message: await run(sid, call, signal) });
       if (reply.stopReason === "error") throw new Error(reply.errorMessage);
-      if (!calls.length && !said.length && !signal.aborted)
+      // The model is asked again while the conversation ends with something other than its own reply.
+      if (chain(read(sid)).at(-1)?.role === "assistant" && !said.length && !signal.aborted)
         return reply.stopReason === "length" ? "max_tokens" : "end_turn";
     }
   } finally {
