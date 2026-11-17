@@ -55,11 +55,13 @@ through it, and Enter takes the first once only one fits.
 
 ## How it works
 
-**A session is a file.** `~/.bee/agent/sessions/<id>.jsonl` holds one line per message, written as things happen, and
-its messages are the whole request to the model. Line 0 is the system prompt. A setting is a line too, `{model}`,
-`{thinking}` or `{cache}`, and the latest one in the file holds. Line 0 starts with those in `settings.json`. The
-harness keeps no other state: it reads the file before every step. Only a new session waits in memory: its file is
-written with the first message, so a session never used leaves none.
+**A session is a file.** `~/.bee/agent/sessions/<working directory, URL-encoded>/<id>.jsonl` holds the conversation's
+messages and the settings chosen in it, `{model}`, `{thinking}` or `{cache}`, one per line, written as things happen.
+Its path is the session's id, and its first line is written with the first thing that happens in it, so a session never
+used leaves no file. The harness reads the file before every step and keeps no other state.
+
+**The harness supplies itself.** Each request is the session's messages, with the prompt and the tool as they are now.
+The latest setting holds, and `settings.json` counts as the first line of every session.
 
 **One tool.** `bash` runs a command in a new bash, in the working directory. Its result is whatever the command wrote,
 cut to 20,000 characters. If what it wrote is an image, the model sees the image. The computer is what lasts: files,
@@ -72,6 +74,6 @@ what to do. Instructions are yours, in `AGENTS.md`.
 before it holds.
 
 **Instructions** come from `AGENTS.md` in `~/.bee/agent` and in every directory from the root down to the working
-directory. They are read once, when the session is created.
+directory. They are read for every request.
 
 Left out: permission prompts, sub-agents, memory, plan mode, compaction, MCP.

@@ -13,10 +13,9 @@ import {
   readdirSync,
   rmSync,
   statSync,
-  writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import {
   clampThinkingLevel,
@@ -25,7 +24,6 @@ import {
   type AssistantMessage,
   type Message,
   type Model,
-  type SystemMessage,
   type ToolCall,
   type ToolResultMessage,
   type UserMessage,
@@ -41,32 +39,22 @@ console.log = console.error; // stdout carries the protocol and nothing else
 const failure = (code: number, message: string) => Object.assign(new Error(message), { code });
 
 // ── Sessions ────────────────────────────────────────────────────────────────
-// A session is a file of lines, written as things happen, and its messages are
-// the conversation. Nothing about a session lives anywhere else.
+// A session is a file of lines, written as things happen: the conversation's
+// messages, and the settings chosen in it. Its id is the file's path, in a
+// folder named for the directory it works in.
 
 type Settings = { model?: string; thinking?: string; cache?: string };
-type Line = Settings & { message?: Message; cwd?: string };
+type Line = Settings & { message?: Message };
 
 const HOME = process.env.BEE_HOME ?? join(homedir(), ".bee", "agent");
 const SESSIONS = join(HOME, "sessions");
-const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
+const folder = (cwd: string) => join(SESSIONS, encodeURIComponent(cwd));
+const cwdOf = (sid: string) => decodeURIComponent(basename(dirname(sid)));
 
-/**
- * The one thing about a session that is not in its file: a new session's text, kept here until its first message,
- * so that a session never used leaves no file.
- */
-const unwritten = new Map<string, string>();
-
-/** A session, as the text of its file. */
-function text(sid: string): string {
-  const kept = unwritten.get(sid);
-  if (kept) return kept;
-  if (!/^[\w-]+$/.test(sid) || !existsSync(file(sid))) throw failure(-32002, `No session ${sid}`);
-  return readFileSync(file(sid), "utf8");
-}
-
-/** The lines. One that is not JSON is empty. */
+/** The lines. A session not yet written has none, and a line that is not JSON is empty. */
 function read(sid: string): Line[] {
+  if (dirname(dirname(sid)) !== SESSIONS) throw failure(-32002, `No session ${sid}`);
+  if (!existsSync(sid)) return [];
   const parse = (json: string) => {
     try {
       return JSON.parse(json) ?? {};
@@ -74,42 +62,12 @@ function read(sid: string): Line[] {
       return {};
     }
   };
-  return text(sid).trimEnd().split("\n").map(parse);
+  return readFileSync(sid, "utf8").trimEnd().split("\n").map(parse);
 }
 
-/** Append a line. With its first message, a new session becomes a file. */
-function append(sid: string, line: Settings | { message: Message }) {
-  const kept = unwritten.get(sid);
-  if (kept && "message" in line) {
-    unwritten.delete(sid);
-    writeFileSync(file(sid), kept);
-  }
-  const before = text(sid);
-  const added = (before.endsWith("\n") ? "" : "\n") + JSON.stringify(line) + "\n";
-  if (unwritten.has(sid)) unwritten.set(sid, before + added);
-  else appendFileSync(file(sid), added);
-}
+const append = (sid: string, line: Line) => appendFileSync(sid, JSON.stringify(line) + "\n");
 
-/** settings.json is a setting line, {"model": ..., "thinking": ..., "cache": ...}. Every new session starts with it. */
-const SETTINGS = join(HOME, "settings.json");
-
-function create(cwd: string): string {
-  const sid = randomUUID();
-  const defaults: Settings = existsSync(SETTINGS) ? JSON.parse(readFileSync(SETTINGS, "utf8")) : {};
-  const message: SystemMessage = {
-    role: "system",
-    content: system(cwd),
-    toolsAdded: [BASH],
-    timestamp: Date.now(),
-  };
-  unwritten.set(sid, JSON.stringify({ ...defaults, cwd, message }) + "\n");
-  return sid;
-}
-
-/** The conversation: the messages in the file. */
-function conversation(lines: Line[]): Message[] {
-  return lines.flatMap((line) => (line.message ? [line.message] : []));
-}
+const conversation = (lines: Line[]) => lines.flatMap((line) => (line.message ? [line.message] : []));
 
 // ── The model ───────────────────────────────────────────────────────────────
 
@@ -125,6 +83,10 @@ const system = (cwd: string) => `
 You are an agent in the bee harness.
 
 ${instructions(cwd)}`.trim();
+
+/** settings.json, as a setting line every session starts with. */
+const SETTINGS = join(HOME, "settings.json");
+const defaults = (): Settings => (existsSync(SETTINGS) ? JSON.parse(readFileSync(SETTINGS, "utf8")) : {});
 
 /** AGENTS.md from ~/.bee/agent, then from every directory down to cwd. */
 function instructions(cwd: string): string {
@@ -156,8 +118,9 @@ const ref = (m: Model<Api>) => `${m.provider}/${m.id}`;
  * Settings are lines too, and for each the latest line that makes sense holds. Without one, the model is the first
  * there is a key for, thinking is medium, and the prompt stays cached for five minutes. ("long" is an hour.)
  */
-function settings(lines: Line[]) {
+function settings(sid: string) {
   if (!available.length) throw failure(-32000, "No provider key is set.");
+  const lines = [defaults(), ...read(sid)];
   const latest = <T>(pick: (line: Line) => T | undefined) => lines.map(pick).findLast(Boolean);
   const model = latest((line) => available.find((m) => ref(m) === line.model)) ?? available[0];
   const level = latest((line) => MODEL_THINKING_LEVELS.find((level) => level === line.thinking)) ?? "medium";
@@ -167,11 +130,11 @@ function settings(lines: Line[]) {
 
 /** One reply from the model, streamed to the editor. */
 async function ask(sid: string, signal: AbortSignal): Promise<AssistantMessage> {
-  const lines = read(sid);
-  const { model, thinking, cache } = settings(lines);
+  const { model, thinking, cache } = settings(sid);
   const reasoning = thinking === "off" ? undefined : thinking;
   const request = { signal, sessionId: sid, reasoning, cacheRetention: cache };
-  const stream = models.streamSimple(model, { messages: conversation(lines) }, request);
+  const context = { systemPrompt: system(cwdOf(sid)), tools: [BASH], messages: conversation(read(sid)) };
+  const stream = models.streamSimple(model, context, request);
   for await (const event of stream) {
     if (event.type === "text_delta") say(sid, "agent_message", event.delta);
     if (event.type === "thinking_delta") say(sid, "agent_thought", event.delta);
@@ -184,7 +147,7 @@ async function ask(sid: string, signal: AbortSignal): Promise<AssistantMessage> 
 /** How full the context is: the tokens in the conversation, as the model counted them in a reply. */
 function usage(sid: string, reply: AssistantMessage) {
   const { input, output, cacheRead, cacheWrite } = reply.usage;
-  const size = settings(read(sid)).model.contextWindow;
+  const size = settings(sid).model.contextWindow;
   update(sid, { sessionUpdate: "usage_update", used: input + output + cacheRead + cacheWrite, size });
 }
 
@@ -204,10 +167,7 @@ async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<str
         append(sid, { message });
         say(sid, "user_message", plain(message.content));
       }
-      if (signal.aborted) {
-        append(sid, { message: user("[The user interrupted.]") });
-        return "cancelled";
-      }
+      if (signal.aborted) return "cancelled";
       const reply = await ask(sid, signal);
       const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
       append(sid, { message: reply });
@@ -242,7 +202,7 @@ async function bash(sid: string, call: ToolCall, signal: AbortSignal): Promise<O
   const path = join(tmpdir(), `bee-${randomUUID()}`);
   const out = openSync(path, "w");
   const child = spawn("bash", ["-c", command], {
-    cwd: read(sid)[0].cwd,
+    cwd: cwdOf(sid),
     stdio: ["ignore", out, out],
     detached: true, // its own process group, so an interrupt stops all of it
   });
@@ -306,7 +266,7 @@ function fenced(body: string, language = "") {
 const source = (call: ToolCall) => String(call.arguments.command ?? "");
 
 function showCall(sid: string, call: ToolCall) {
-  const title = source(call).trim().split("\n")[0].replace(/^#\s*/, "").slice(0, 80) || "bash";
+  const title = source(call).trim().split("\n")[0].slice(0, 80);
   const content = [fenced(source(call), "bash")];
   const shown = { toolCallId: call.id, title, kind: "execute", status: "in_progress", content };
   update(sid, { sessionUpdate: "tool_call", ...shown, rawInput: call.arguments });
@@ -341,7 +301,7 @@ function replay(sid: string) {
 
 /** The settings the editor can change. Each one's id is its key in a line. */
 function options(sid: string) {
-  const { model, thinking } = settings(read(sid));
+  const { model, thinking } = settings(sid);
   const all = available.map((m) => ({ value: ref(m), name: m.name }));
   const levels = getSupportedThinkingLevels(model).map((level) => ({ value: level, name: level }));
   return [
@@ -352,18 +312,16 @@ function options(sid: string) {
 
 /** The sessions, latest first. One's title is the start of what the user first said in it. */
 function list(cwd?: string) {
-  const sessions = readdirSync(SESSIONS)
-    .filter((name) => name.endsWith(".jsonl"))
-    .map((name) => {
-      const sessionId = name.slice(0, -".jsonl".length);
-      const lines = read(sessionId);
-      const first = lines.find((line) => line.message?.role === "user")?.message?.content ?? "";
-      const updatedAt = statSync(file(sessionId)).mtime.toISOString();
-      return { sessionId, cwd: lines[0].cwd, title: plain(first).slice(0, 80) || undefined, updatedAt };
+  const folders = cwd ? [folder(cwd)] : readdirSync(SESSIONS).map((name) => join(SESSIONS, name));
+  const sessions = folders
+    .filter(existsSync)
+    .flatMap((dir) => readdirSync(dir).map((name) => join(dir, name)))
+    .map((sessionId) => {
+      const first = conversation(read(sessionId)).find((message) => message.role === "user")?.content ?? "";
+      const updatedAt = statSync(sessionId).mtime.toISOString();
+      return { sessionId, cwd: cwdOf(sessionId), title: plain(first).slice(0, 80) || undefined, updatedAt };
     });
-  return sessions
-    .filter((session) => !cwd || session.cwd === cwd)
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  return sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 /** Prompt blocks from the editor, as content for the model. */
@@ -396,7 +354,10 @@ const handlers: Record<string, (params: any) => unknown> = {
       sessionCapabilities: { list: {}, resume: {} },
     },
   }),
-  "session/new": ({ cwd }) => open(create(cwd)),
+  "session/new": ({ cwd }) => {
+    mkdirSync(folder(cwd), { recursive: true, mode: 0o700 });
+    return open(join(folder(cwd), randomUUID() + ".jsonl"));
+  },
   "session/resume": ({ sessionId }) => open(sessionId),
   "session/load": ({ sessionId }) => {
     replay(sessionId);
