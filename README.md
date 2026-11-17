@@ -66,9 +66,9 @@ directory, the prompt with the `AGENTS.md` files, the tool, and the settings in 
 harness reads the file before every step and keeps no other state. For each setting, `{model}`, `{thinking}`,
 `{cache}` or `{cwd}`, the latest line holds.
 
-**One tool.** `bash`. The working directory persists between calls; nothing else does. A command runs where the last
-one left bash, or in the session's directory if that is gone. It returns stdout and stderr, cut at 12,000 characters,
-or the image written. The computer is what lasts: files, and whatever a command left running.
+**One tool.** `bash`: "Runs a command in bash. The working directory persists between calls; nothing else does. Returns
+stdout and stderr, cut at 12,000 characters, or the image written." A command runs where the last one left bash, or in
+the session's directory if that is gone. The computer is what lasts: files, and whatever a command left running.
 
 The directory persists because Claude is trained on a shell where it does. In a fresh bash each call, whether the
 prompt names the directory or a `pwd` finds it, the model puts `cd <it> &&` before every command.
