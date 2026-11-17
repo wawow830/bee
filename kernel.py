@@ -10,8 +10,23 @@ FILE = sys.argv[1]
 KEPT = FILE.removesuffix(".jsonl") + ".pkl"
 
 
+def parse(code, name):
+    """The code as a tree. A line that starts with ! and is not Python runs in the shell, as in IPython."""
+    lines = code.split("\n")
+    while True:
+        try:
+            return compile("\n".join(lines), name, "exec", ast.PyCF_ONLY_AST)
+        except SyntaxError as e:
+            at = (e.lineno or 1) - 1
+            indent, bang, command = lines[at].partition("!")
+            if not bang or indent.strip():
+                raise
+            # Not captured, so .stdout is None, and a last line has no value to print.
+            lines[at] = f"{indent}__import__('subprocess').run({command!r}, shell=True).stdout"
+
+
 def run(code, name):
-    tree = compile(code, name, "exec", ast.PyCF_ONLY_AST)
+    tree = parse(code, name)
     last = tree.body.pop() if tree.body and isinstance(tree.body[-1], ast.Expr) else None
     exec(compile(tree, name, "exec"), scope)
     if last and (value := eval(compile(ast.Expression(last.value), name, "eval"), scope)) is not None:
@@ -63,7 +78,7 @@ def restore():
             continue  # not a reply that ran code
         for code in codes:
             try:
-                for node in ast.parse(code).body:
+                for node in parse(code, "<restored>").body:
                     if isinstance(node, definitions):
                         exec(compile(ast.Module([node], []), "<restored>", "exec"), scope)
             except Exception:
