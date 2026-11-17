@@ -57,16 +57,16 @@ through it, and Enter sends the command once only one fits.
 ## How it works
 
 **A session is a file.** `~/.bee/agent/sessions/<id>.jsonl` holds one line per message or setting chosen, written as
-things happen and only ever appended. Its first line is how it began: its working directory, the prompt with the
-`AGENTS.md` files, the tool, and the settings in `settings.json`.
+things happen and only ever appended. Its first line is how it began: its working directory, the prompt naming it with
+the `AGENTS.md` files, the tool, and the settings in `settings.json`.
 
 **Every request is the file's messages.** So each begins as the last one did, and the provider's cache of it holds. The
 harness reads the file before every step and keeps no other state. For each setting, `{model}`, `{thinking}` or
 `{cache}`, the latest line holds.
 
-**One tool.** `bash` runs a command in a new bash, in the working directory, which it names. A `cd` lasts only for
-that command. Its result is whatever the command wrote, cut to 20,000 characters. If what it wrote is an image, the
-model sees the image. The computer is what lasts: files, and whatever the command left running.
+**One tool.** `bash` runs a command in a new bash, in the working directory. Its result is whatever the command wrote,
+cut to 20,000 characters. If what it wrote is an image, the model sees the image. The computer is what lasts: files, and
+whatever the command left running.
 
 **The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model what
 to do. Instructions are yours, in `AGENTS.md`, from `~/.bee/agent` and every directory from the root down to the working

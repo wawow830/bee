@@ -69,14 +69,13 @@ const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
 
 const SHOWN = 20_000; // characters of output the model sees per call
 
-/** The tool, in the session's directory. */
-const BASH = (cwd: string) => ({
+const BASH = {
   name: "bash",
   description:
-    `Runs a command in a new bash in ${cwd}, so a cd lasts only until the command ends. Returns what it wrote to ` +
-    `stdout and stderr, cut to ${SHOWN.toLocaleString("en")} characters, or the image it wrote.`,
+    "Runs a command in a new bash in the working directory. Returns what it wrote to stdout and stderr, cut to " +
+    `${SHOWN.toLocaleString("en")} characters, or the image it wrote.`,
   parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
-});
+};
 
 /** AGENTS.md from ~/.bee/agent, then from every directory down to cwd. */
 function instructions(cwd: string) {
@@ -95,8 +94,8 @@ const beginning = (cwd: string): Line => ({
   cwd,
   message: {
     role: "system",
-    content: `You are an agent in the bee harness.\n\n${instructions(cwd)}`.trim(),
-    toolsAdded: [BASH(cwd)],
+    content: `You are an agent in the bee harness. The working directory is ${cwd}.\n\n${instructions(cwd)}`.trim(),
+    toolsAdded: [BASH],
     timestamp: Date.now(),
   },
 });
@@ -232,7 +231,7 @@ async function bash(sid: string, command: string, signal: AbortSignal) {
 async function run(sid: string, call: ToolCall, signal: AbortSignal): Promise<ToolResultMessage> {
   showCall(sid, call);
   const { content, failed } = await Promise.resolve()
-    .then(() => bash(sid, validateToolCall([BASH(cwdOf(sid))], call).command, signal))
+    .then(() => bash(sid, validateToolCall([BASH], call).command, signal))
     .catch((error: Error) => ({ content: [{ type: "text" as const, text: error.message }], failed: true }));
   const result: ToolResultMessage = {
     role: "toolResult",
