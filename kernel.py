@@ -19,7 +19,7 @@ def run(code, name):
 
 
 def call(code, name):
-    """Run code. Returns whether it raised. What it wrote is in `written`."""
+    """Run code. Returns whether it raised."""
     linecache.cache[name] = len(code), None, code.splitlines(True), name  # so tracebacks can quote it
     signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
@@ -75,30 +75,41 @@ def restore():
         except Exception:
             pass
     lost = ", ".join(name for name in before if name not in scope) or "nothing"
-    return f"[New Python session. Restored: {', '.join(names()) or 'nothing'}. Lost: {lost}.]\n"
+    print(f"[New Python session. Restored: {', '.join(names()) or 'nothing'}. Lost: {lost}.]")
+
+
+def take():
+    """What the session has written since this was last asked, cut to its two ends when it is too long."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    written.seek(0)
+    output = written.read().decode(errors="replace")
+    written.seek(0)
+    written.truncate()
+    cut = len(output) - SHOWN
+    return output if cut <= 0 else f"{output[: SHOWN // 2]}\n[{cut} characters cut]\n{output[-SHOWN // 2 :]}"
 
 
 # The harness keeps the pipes. The session and its children get no input, and write to one file.
-requests, replies = os.fdopen(os.dup(0)), os.fdopen(os.dup(1), "w")
+requests = os.fdopen(os.dup(0))
+replies = os.fdopen(os.dup(1), "w")
 written = tempfile.TemporaryFile()
-os.dup2(os.open(os.devnull, os.O_RDONLY), 0), os.dup2(written.fileno(), 1), os.dup2(written.fileno(), 2)
+os.dup2(os.open(os.devnull, os.O_RDONLY), 0)
+os.dup2(written.fileno(), 1)
+os.dup2(written.fileno(), 2)
 sys.stdout.reconfigure(line_buffering=True)
 signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 # The session's code is the main module, as in a REPL. (`kernel` keeps this script's own module alive.)
-kernel, main = sys.modules["__main__"], types.ModuleType("__main__")
-sys.modules["__main__"] = main
+kernel = sys.modules["__main__"]
+main = sys.modules["__main__"] = types.ModuleType("__main__")
 sys.path[0] = ""  # imports look in the working directory, not next to this script
 scope = main.__dict__
-note = restore() if os.path.exists(KEPT) else ""  # this session had a Python before
+
+if os.path.exists(KEPT):  # this session had a Python before, and the first call is told what is left of it
+    restore()
 
 for n, request in enumerate(map(json.loads, requests)):
     failed = call(request["code"], f"<call {n}>")
     save()
-    sys.stdout.flush(), sys.stderr.flush()
-    written.seek(0)
-    output, note = note + written.read().decode(errors="replace"), ""
-    written.seek(0), written.truncate()
-    if (cut := len(output) - SHOWN) > 0:
-        output = f"{output[: SHOWN // 2]}\n[{cut} characters cut]\n{output[-SHOWN // 2 :]}"
-    print(json.dumps({"output": output, "failed": failed}), file=replies, flush=True)
+    print(json.dumps({"output": take(), "failed": failed}), file=replies, flush=True)
