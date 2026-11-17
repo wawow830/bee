@@ -114,8 +114,8 @@ function chain(lines: Line[]): Message[] {
 const PYTHON = {
   name: "python",
   description:
-    "Runs Python in a persistent session that starts in cwd. A line that starts with ! runs in the shell. " +
-    "Returns stdout and stderr, and the value of a final expression. Output is truncated to 20,000 characters.",
+    "Runs Python in a persistent session that starts in cwd. Returns stdout and stderr, and the value of a final " +
+    "expression. Output is truncated to 20,000 characters.",
   parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
 };
 

@@ -64,9 +64,8 @@ first message, so a session never used leaves none.
 a summary appended after line 0. A rewind is a line appended after any other. A setting is a line too, `{model}`,
 `{thinking}` or `{cache}`, and the latest one in the file holds. Line 0 starts with those in `settings.json`.
 
-**One tool.** `python` runs code in a Python process that lasts as long as the harness does. A line that starts with `!`
-runs in the shell, as in IPython. Its result is whatever the code and its child processes wrote, cut to 20,000
-characters.
+**One tool.** `python` runs code in a Python process that lasts as long as the harness does. Its result is whatever the
+code and its child processes wrote, cut to 20,000 characters.
 
 **Its variables are kept.** After every call the Python session saves what it can beside the session file. A new
 Python, after the harness restarts or the old one dies, runs the session's imports and definitions again, loads the
