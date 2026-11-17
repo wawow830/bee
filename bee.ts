@@ -284,7 +284,7 @@ function replay(sid: string) {
 function options(sid: string) {
   if (!available.length) throw Object.assign(new Error("No provider key is set."), { code: -32000 });
   const lines = read(sid);
-  const select = (id: string, category: string | undefined, currentValue: string, values: string[][]) => {
+  const select = (id: string, category: string, currentValue: string, values: string[][]) => {
     const options = values.map(([value, name]) => ({ value, name }));
     return { id, name: id[0].toUpperCase() + id.slice(1), category, type: "select", currentValue, options };
   };
@@ -293,7 +293,6 @@ function options(sid: string) {
   return [
     select("model", "model", ref(model(lines)), all),
     select("thinking", "thought_level", thinking(lines), levels),
-    select("cache", undefined, cache(lines), ["long", "short", "none"].map((value) => [value, value])),
   ];
 }
 
