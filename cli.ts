@@ -59,6 +59,19 @@ const wrap = (text: string, size = room()) => fill(text, size).map((row) => row.
 const [strong, code] = [1, 2];
 const looks: Paint[] = [(text) => text, bold, gray, (text) => bold(gray(text))];
 
+/** The marks of markdown in `text`, and each character between them. */
+const tokens = (text: string) => text.match(/\*\*|`|[^]/g) ?? [];
+
+/** Where in `tokens` a mark is that none after it closes. */
+function unpaired(tokens: string[]) {
+  const at = new Set<number>();
+  for (const mark of ["`", "**"]) {
+    const each = tokens.flatMap((token, n) => (token === mark ? [n] : []));
+    if (each.length % 2) at.add(each.at(-1)!);
+  }
+  return at;
+}
+
 /** Where a line of code begins or ends. */
 const fence = (line: string) => /^\s*```/.test(line);
 
@@ -72,19 +85,14 @@ function markdown(line: string, { inCode = false, whole = true } = {}): string[]
   const heading = line.match(/^#+\s+(.*)/);
   const [, indent = "", item = "", body = line] = heading ? [] : (line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)/) ?? []);
   const lead = item && indent + (/\d/.test(item) ? item : "•") + " ";
-  const tokens = (heading?.[1] ?? body).match(/\*\*|`|[^]/g) ?? [];
-  // Once the line is whole, a mark with none after it to close it is only characters.
-  const unpaired = new Set<number>();
-  for (const mark of ["`", "**"]) {
-    const at = tokens.flatMap((token, n) => (token === mark ? [n] : []));
-    if (whole && at.length % 2) unpaired.add(at.at(-1)!);
-  }
+  const parts = tokens(heading?.[1] ?? body);
+  const plain = whole ? unpaired(parts) : new Set<number>(); // once the line is whole, these marks are characters
   let text = "";
   let look = heading ? strong : 0;
   const each: number[] = []; // the look of each character of `text`
-  tokens.forEach((token, n) => {
-    if (token === "`" && !unpaired.has(n)) look ^= code;
-    else if (token === "**" && !(look & code) && !unpaired.has(n)) look ^= strong;
+  parts.forEach((token, n) => {
+    if (token === "`" && !plain.has(n)) look ^= code;
+    else if (token === "**" && !(look & code) && !plain.has(n)) look ^= strong;
     else for (const character of token) (text += character), each.push(look);
   });
   let from = 0;
@@ -204,7 +212,10 @@ function show(rows: string[]) {
   begun ||= shown.length > 0;
 }
 
-/** A reply arrives in pieces. Its rows are printed as they fill, and the last waits for more. */
+/**
+ * A reply arrives in pieces. Its rows are printed as they fill, and the last waits for more. While a mark in the line
+ * is not closed, its rows wait too: how they look depends on whether it ever is.
+ */
 function stream(text: string) {
   const lines = (reply + text).split("\n");
   reply = lines.pop()!;
@@ -215,8 +226,9 @@ function stream(text: string) {
     if (fence(line)) inCode = !inCode;
   }
   const writing = markdown(reply, { inCode, whole: false });
-  show([...rows, ...writing.slice(held, -1)]);
-  held = Math.max(held, writing.length - 1);
+  const settled = inCode || unpaired(tokens(reply)).size === 0;
+  show([...rows, ...(settled ? writing.slice(held, -1) : [])]);
+  if (settled) held = Math.max(held, writing.length - 1);
 }
 
 /** The reply is over, if there was one: print what was waiting. */
