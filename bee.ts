@@ -4,8 +4,8 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import {
+  appendFileSync,
   closeSync,
-  constants,
   existsSync,
   mkdirSync,
   openSync,
@@ -13,7 +13,6 @@ import {
   readdirSync,
   rmSync,
   statSync,
-  writeSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -114,13 +113,7 @@ function lines(sid: string): Line[] {
   return read(file(sid)).trimEnd().split("\n").map(parse);
 }
 
-/** Add a line to a session. Only its beginning makes the file, so a session deleted stays deleted. */
-function append(sid: string, line: Line, flags: string | number = constants.O_WRONLY | constants.O_APPEND) {
-  const fd = openSync(file(sid), flags);
-  writeSync(fd, JSON.stringify(line) + "\n");
-  closeSync(fd);
-}
-
+const append = (sid: string, line: Line) => appendFileSync(file(sid), JSON.stringify(line) + "\n");
 const cwdOf = (sid: string) => lines(sid)[0].cwd!;
 
 const conversation = (sid: string) => lines(sid).flatMap((line) => (line.message ? [line.message] : []));
@@ -375,7 +368,7 @@ const handlers: Record<string, (params: any) => unknown> = {
   }),
   "session/new": ({ cwd }) => {
     const sessionId = randomUUID();
-    append(sessionId, beginning(cwd), "wx");
+    append(sessionId, beginning(cwd));
     return open(sessionId);
   },
   "session/resume": ({ sessionId }) => open(sessionId),
