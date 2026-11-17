@@ -1,9 +1,9 @@
 # bee
 
 A minimal agent harness. It speaks [ACP](https://agentclientprotocol.com) on stdio, so your editor is the UI. It gives
-the model one tool, a Python session. A session is one append-only file.
+the model one tool, bash. A session is one append-only file.
 
-Three files: `bee.ts` is the harness, `kernel.py` is the Python session, `cli.ts` is a terminal for it.
+Two files: `bee.ts` is the harness, `cli.ts` is a terminal for it.
 
 ## Run
 
@@ -64,13 +64,13 @@ first message, so a session never used leaves none.
 a summary appended after line 0. A rewind is a line appended after any other. A setting is a line too, `{model}`,
 `{thinking}` or `{cache}`, and the latest one in the file holds. Line 0 starts with those in `settings.json`.
 
-**One tool.** `python` runs code in a Python process that lasts as long as the harness does. Its result is whatever the
-code and its child processes wrote, cut to 20,000 characters.
+**One tool.** `bash` runs a command in a new bash, in the working directory. Its result is whatever the command wrote,
+cut to 20,000 characters. The computer is what lasts: files, and whatever the command left running.
 
-**`~/.bee/agent` is on the Python path.** A module kept there can be imported in any session.
+**`~/.bee/agent` is on the Python path.** A module kept there can be imported by any command.
 
 **The model runs the harness** with that tool, by appending lines to the session file. There is no API for it, and
-the prompt only says where the file is and how it chains. The harness writes each reply and its results after whatever the reply's code
+the prompt only says where the file is and how it chains. The harness writes each reply and its results after whatever the reply's commands
 appended, so the model continues from its own line. This is how it can compact its context, rewind, or change a setting.
 
 **The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model

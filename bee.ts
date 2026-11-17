@@ -1,9 +1,21 @@
 #!/usr/bin/env bun
 // bee: a minimal agent harness. ACP on stdio, one tool, one append-only file per session.
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { once } from "node:events";
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import {
@@ -94,7 +106,7 @@ function create(cwd: string): string {
   const message: SystemMessage = {
     role: "system",
     content: system(cwd, file(sid)),
-    toolsAdded: [PYTHON],
+    toolsAdded: [BASH],
     timestamp: Date.now(),
   };
   unwritten.set(sid, JSON.stringify({ ...defaults, parent: null, cwd, message }) + "\n");
@@ -111,12 +123,10 @@ function chain(lines: Line[]): Message[] {
 
 // ── The model ───────────────────────────────────────────────────────────────
 
-const PYTHON = {
-  name: "python",
-  description:
-    "Runs Python in a persistent session that starts in cwd. Returns stdout and stderr, and the value of a final " +
-    "expression. Output is truncated to 20,000 characters.",
-  parameters: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
+const BASH = {
+  name: "bash",
+  description: "Runs a command with bash in cwd. Returns what it wrote to stdout and stderr, cut to 20,000 characters.",
+  parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
 };
 
 const system = (cwd: string, path: string) => `
@@ -198,7 +208,7 @@ async function turn(sid: string, signal: AbortSignal): Promise<string> {
     const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
     const results = [];
     for (const call of calls) if (!signal.aborted) results.push(await run(sid, call, signal));
-    // Written only now, so that the exchange follows any line its own code appended.
+    // Written only now, so that the exchange follows any line its own commands appended.
     for (const message of [reply, ...results]) append(sid, { message });
     if (reply.stopReason === "error") throw new Error(reply.errorMessage);
     if (signal.aborted) {
@@ -210,45 +220,42 @@ async function turn(sid: string, signal: AbortSignal): Promise<string> {
 }
 
 // ── The tool ────────────────────────────────────────────────────────────────
-// Each session gets one Python process, a child of this one, started at its
-// first call. It takes a line of code and answers with a line of output.
 
-type Kernel = { child: ChildProcess; replies: AsyncIterator<string> };
+const SHOWN = 20_000; // characters of output the model sees per call
 
-const kernels = new Map<string, Kernel>();
-
-function start(sid: string): Kernel {
+/** Run a call's command. Returns what it wrote, cut to its two ends when it is too long, and whether it failed. */
+async function bash(sid: string, call: ToolCall, signal: AbortSignal): Promise<{ output: string; failed: boolean }> {
+  const { command } = validateToolCall([BASH], call);
   const PYTHONPATH = [HOME, process.env.PYTHONPATH].filter(Boolean).join(delimiter); // ~/.bee/agent is importable
-  const child = spawn("python3", [join(import.meta.dir, "kernel.py")], {
+  // Written to a file, not a pipe, so the call ends when the command does, whatever it left running.
+  const path = join(tmpdir(), `bee-${randomUUID()}`);
+  const written = openSync(path, "w");
+  const child = spawn("bash", ["-c", command], {
     cwd: read(sid)[0].cwd,
     env: { ...process.env, PYTHONPATH },
-    stdio: ["pipe", "pipe", "inherit"],
+    stdio: ["ignore", written, written],
+    detached: true, // its own process group, so an interrupt stops all of it
   });
-  const kernel = { child, replies: createInterface({ input: child.stdout! })[Symbol.asyncIterator]() };
-  for (const end of ["exit", "error"]) child.once(end, () => kernels.delete(sid));
-  kernels.set(sid, kernel);
-  return kernel;
-}
-
-/** Run a call's code in the session's Python. Returns what it wrote, and whether it raised. */
-async function python(sid: string, call: ToolCall, signal: AbortSignal): Promise<{ output: string; failed: boolean }> {
-  const { code } = validateToolCall([PYTHON], call);
-  const { child, replies } = kernels.get(sid) ?? start(sid);
-  const interrupt = () => child.kill("SIGINT");
+  const interrupt = () => process.kill(-child.pid!, "SIGINT");
   signal.addEventListener("abort", interrupt);
-  child.stdin!.write(JSON.stringify({ code }) + "\n");
-  const { value } = await replies.next();
-  signal.removeEventListener("abort", interrupt);
-  if (value) return JSON.parse(value);
-  kernels.delete(sid);
-  return { output: "The Python session died.", failed: true };
+  try {
+    const [status] = await once(child, "exit");
+    const output = readFileSync(path, "utf8");
+    const cut = output.length - SHOWN;
+    const shown = cut <= 0 ? output : `${output.slice(0, SHOWN / 2)}\n[${cut} characters cut]\n${output.slice(-SHOWN / 2)}`;
+    return { output: shown, failed: status !== 0 };
+  } finally {
+    signal.removeEventListener("abort", interrupt);
+    closeSync(written);
+    rmSync(path);
+  }
 }
 
 /** Run one tool call, shown to the editor. Returns its result. */
 async function run(sid: string, call: ToolCall, signal: AbortSignal): Promise<ToolResultMessage> {
   showCall(sid, call);
-  const refused = (error: Error) => ({ output: error.message, failed: true }); // not a call Python can be given
-  const { output, failed } = await python(sid, call, signal).catch(refused);
+  const refused = (error: Error) => ({ output: error.message, failed: true }); // not a call bash can be given
+  const { output, failed } = await bash(sid, call, signal).catch(refused);
   const result: ToolResultMessage = {
     role: "toolResult",
     toolCallId: call.id,
@@ -281,11 +288,11 @@ function fenced(body: string, language = "") {
   return { type: "content", content: { type: "text", text: `${fence}${language}\n${body.trim()}\n${fence}` } };
 }
 
-const source = (call: ToolCall) => String(call.arguments.code ?? "");
+const source = (call: ToolCall) => String(call.arguments.command ?? "");
 
 function showCall(sid: string, call: ToolCall) {
-  const title = source(call).trim().split("\n")[0].replace(/^#\s*/, "").slice(0, 80) || "python";
-  const content = [fenced(source(call), "python")];
+  const title = source(call).trim().split("\n")[0].replace(/^#\s*/, "").slice(0, 80) || "bash";
+  const content = [fenced(source(call), "bash")];
   const shown = { toolCallId: call.id, title, kind: "execute", status: "in_progress", content };
   update(sid, { sessionUpdate: "tool_call", ...shown, rawInput: call.arguments });
 }
@@ -293,7 +300,7 @@ function showCall(sid: string, call: ToolCall) {
 function showResult(sid: string, call: ToolCall, result: ToolResultMessage) {
   const status = result.isError ? "failed" : "completed";
   const output = plain(result.content).trim();
-  const content = [fenced(source(call), "python"), ...(output ? [fenced(output)] : [])];
+  const content = [fenced(source(call), "bash"), ...(output ? [fenced(output)] : [])];
   update(sid, { sessionUpdate: "tool_call_update", toolCallId: call.id, status, content, rawOutput: output });
 }
 
@@ -411,4 +418,4 @@ for await (const line of createInterface({ input: process.stdin })) {
       (error) => reply({ error: { code: error.code ?? -32603, message: error.message } }),
     );
 }
-process.exit(); // the editor hung up; the Python sessions go with us
+process.exit(); // the editor hung up

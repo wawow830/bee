@@ -148,7 +148,7 @@ const updates: Record<string, (update: any) => void> = {
     draw();
   },
   tool_call: ({ toolCallId, rawInput }) => {
-    running.set(toolCallId, rawInput.code);
+    running.set(toolCallId, rawInput.command);
     thought = "";
     end();
   },
