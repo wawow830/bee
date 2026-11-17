@@ -219,7 +219,7 @@ const kernels = new Map<string, Kernel>();
 
 function start(sid: string): Kernel {
   const PYTHONPATH = [HOME, process.env.PYTHONPATH].filter(Boolean).join(delimiter); // ~/.bee/agent is importable
-  const child = spawn("python3", [join(import.meta.dir, "kernel.py"), file(sid)], {
+  const child = spawn("python3", [join(import.meta.dir, "kernel.py")], {
     cwd: read(sid)[0].cwd,
     env: { ...process.env, PYTHONPATH },
     stdio: ["pipe", "pipe", "inherit"],
