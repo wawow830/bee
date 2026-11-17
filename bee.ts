@@ -52,6 +52,23 @@ for (const [id, { apiKey, baseUrl }] of Object.entries<any>(JSON.parse(read(MODE
   const resolve = async () => ({ auth: { apiKey, baseUrl }, source: MODELS });
   if (provider) models.setProvider({ ...provider, auth: { apiKey: { name: MODELS, resolve } } });
 }
+
+/** pi.dev's list of a provider's models, as pi has it. The one pi-ai ships is only as new as its release. */
+const latest = (id: string): Promise<Model<Api>[]> =>
+  fetch(`https://pi.dev/api/models/providers/${id}`, { signal: AbortSignal.timeout(3000) })
+    .then((response) => (response.ok ? response.json().then(Object.values) : []))
+    .catch(() => []);
+
+/** Each provider with a key lists pi.dev's models, then those pi-ai knows that pi.dev does not. */
+const keyed = new Set((await models.getAvailable()).map((model) => model.provider));
+await Promise.all(
+  [...keyed].map(async (id) => {
+    const newer = await latest(id);
+    const provider = models.getProvider(id)!;
+    const older = provider.getModels().filter((model) => !newer.some((one) => one.id === model.id));
+    models.setProvider({ ...provider, getModels: () => [...newer, ...older] });
+  }),
+);
 const available = await models.getAvailable();
 const ref = (model: Model<Api>) => `${model.provider}/${model.id}`;
 

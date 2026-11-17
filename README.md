@@ -23,6 +23,9 @@ Providers go in `~/.bee/agent/models.json`, in the format pi uses:
 `baseUrl` is optional. A key in the environment that [pi-ai](https://www.npmjs.com/package/@earendil-works/pi-ai)
 knows, such as `ANTHROPIC_API_KEY`, works too.
 
+The models are pi's: as bee starts, it asks pi.dev which each provider has, so a model released after pi-ai is there
+too. When pi.dev cannot be reached, the list pi-ai shipped with stands.
+
 | Variable | Meaning |
 | --- | --- |
 | `BEE_HOME` | Where bee keeps its files. Without it, `~/.bee/agent` |
