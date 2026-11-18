@@ -426,12 +426,6 @@ function layout() {
   return rows;
 }
 
-/** What a command is set to, shown beside it as a hint. */
-function current(id: string) {
-  if (id === "session") return [usage, title && `"${title}"`, sessionId].filter(Boolean).join(" ");
-  return options.find((option) => option.id === id)?.currentValue ?? "";
-}
-
 /** Draw the screen: as much of the transcript as fits, and under it what is queued and the prompt. */
 function draw() {
   const size = room();
@@ -444,6 +438,7 @@ function draw() {
   const listed = fits.slice(last - choices, last);
   const from = command?.of ? command.of.length + 2 : 0; // values are shown from where they differ
   const more = fits.length - listed.length;
+  const set = (hint: string) => commands().find((one) => `/${one.id} ` === hint)!.set; // what a command hinted is set to
   const widest = Math.max(...listed.map((hint) => hint.trimEnd().length));
   const below = input.length - before.length + listed.length + (more ? 1 : 0);
   const turning = spinner[Math.floor(Date.now() / frame) % spinner.length];
@@ -453,8 +448,8 @@ function draw() {
     ...input.slice(1).map((row) => pad + row),
     ...listed.map((hint) => {
       // A value is shown as it is, and a command with what it is set to.
-      const set = command!.of ? hint : hint.trimEnd().padEnd(widest) + pad + current(hint.slice(1, -1));
-      const text = set.slice(from, room()).trimEnd();
+      const line = command!.of ? hint : hint.trimEnd().padEnd(widest) + pad + set(hint);
+      const text = line.slice(from, room()).trimEnd();
       return pad + " ".repeat(from) + (hint === typed ? text : dark(text)); // the one Tab is on is in the prompt
     }),
     ...(more ? [pad + " ".repeat(from) + dark(`${more} more`)] : []),
@@ -652,8 +647,8 @@ function queue(text: string, pick?: () => Promise<unknown>) {
 // the words are those of the best kind of fit there is: the value, the value after its provider, or a part of it. What
 // fits is shown under the prompt. Tab goes through it, and Enter sends the command once only one fits.
 
-/** A command: each of its values, and what picking it does. */
-type Command = { id: string; values: Map<string, () => Promise<unknown>> };
+/** A command: what it is set to, each of its values, and what picking it does. */
+type Command = { id: string; set: string; values: Map<string, () => Promise<unknown>> };
 
 /** Values by name. A name already given, or none, names nothing more. */
 function named(values: [string, () => Promise<unknown>][]) {
@@ -666,6 +661,7 @@ function named(values: [string, () => Promise<unknown>][]) {
 function commands(): Command[] {
   const settings = options.map((option) => ({
     id: option.id,
+    set: option.currentValue,
     values: named(
       option.options.map(({ value }) => [
         value,
@@ -677,6 +673,7 @@ function commands(): Command[] {
   }));
   const session = {
     id: "session",
+    set: [usage, title && `"${title}"`, sessionId].filter(Boolean).join(" "),
     values: named([
       ["new", () => open()],
       ...others.map((other): [string, () => Promise<void>] => [other.title!, () => open(other.sessionId)]),
