@@ -67,8 +67,8 @@ command once only one fits. Anything else that starts with `/`, such as a path, 
 ## How it works
 
 **A session is a file.** `~/.bee/agent/sessions/<id>.jsonl` holds one line per message or setting chosen, written as
-things happen and only ever appended. Its first line is how it began: its working directory, the prompt with the
-`AGENTS.md` files, the tool, and the settings in `settings.json`.
+things happen and only ever appended, from the first thing said in it. Its first line is how it began: its working
+directory, the prompt with the `AGENTS.md` files, the tool, and the settings in `settings.json`.
 Closing the editor or the terminal stops a turn as Esc does, so what was said and run until then is written.
 
 **Every request is the file's messages.** So each begins as the last one did, and the provider's cache of it holds. The

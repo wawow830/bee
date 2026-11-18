@@ -90,7 +90,7 @@ for (const provider of providers) fetchCatalog(provider).catch(() => {});
 // settings chosen. Lines are only appended, so every request begins with the
 // last one, and the provider's cache of it holds. The first line is how the
 // session began: its directory, the prompt and the tool, and the settings in
-// settings.json.
+// settings.json. The file is made when the first thing is said in it.
 
 type Settings = { model?: string; thinking?: string; cache?: string };
 type Line = Settings & { message?: Message; cwd?: string };
@@ -133,8 +133,13 @@ const beginning = (cwd: string): Line => ({
   },
 });
 
+/** The lines of each session nothing has been said in yet, held until the first message writes them. */
+const unborn = new Map<string, Line[]>();
+
 /** A session's lines. One that is not JSON is empty. */
 function lines(sid: string): Line[] {
+  const held = unborn.get(sid);
+  if (held) return held;
   if (!/^[\w-]+$/.test(sid) || !existsSync(file(sid))) throw failure(-32002, `No session ${sid}`);
   const parse = (json: string) => {
     try {
@@ -147,18 +152,22 @@ function lines(sid: string): Line[] {
 }
 
 /**
- * Add a line to a session. Only its beginning makes the file, so a session deleted stays deleted: a line written
- * to a new file would be a session with no beginning, which no model will take and no one can list.
+ * Add a line to a session. The first message makes the file, with the lines held before it, so no file is a session
+ * nothing was said in. Nothing else makes it, so a session deleted stays deleted: a line written to a new file would
+ * be a session with no beginning, which no model will take and no one can list.
  */
-function append(sid: string, line: Line, flag: string | number = constants.O_WRONLY | constants.O_APPEND) {
+function append(sid: string, line: Line) {
+  const held = unborn.get(sid);
+  if (held && !line.message) return void held.push(line);
   let fd: number;
   try {
-    fd = openSync(file(sid), flag);
+    fd = openSync(file(sid), held ? "wx" : constants.O_WRONLY | constants.O_APPEND);
   } catch (error: any) {
     throw error.code === "ENOENT" ? failure(-32002, `No session ${sid}`) : error;
   }
   try {
-    writeSync(fd, JSON.stringify(line) + "\n");
+    writeSync(fd, [...(held ?? []), line].map((one) => JSON.stringify(one) + "\n").join(""));
+    unborn.delete(sid);
   } finally {
     closeSync(fd);
   }
@@ -502,7 +511,7 @@ const handlers: Record<string, (params: any) => unknown> = {
   }),
   "session/new": ({ cwd }) => {
     const sessionId = randomUUID();
-    append(sessionId, beginning(cwd), "wx");
+    unborn.set(sessionId, [beginning(cwd)]);
     return open(sessionId);
   },
   "session/resume": ({ sessionId }) => open(sessionId),
