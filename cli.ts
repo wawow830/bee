@@ -269,14 +269,15 @@ function render(text: string, whole: boolean, voice: Voice) {
 }
 
 // ── Screen ──────────────────────────────────────────────────────────────────
-// The screen is bee's own: the transcript, and under it what you have queued and the prompt. The transcript is turns,
-// each what you said and what came of it. Its answer is the last thing bee said, if nothing came after it, and is
-// shown whole as it comes. Before it is the work: what bee thought and ran, and what it said on the way. While bee
-// works, the work is shown, each thing as its first row, and clicking it shows all of it: the whole thought, or the
-// whole command and what it printed. Once the turn is over, ended or stopped, the work folds away behind what you said,
-// and clicking what you said or the answer unfolds it. The wheel scrolls, and at the bottom the transcript follows
-// what comes. Where you have scrolled to is a place in what was said, not a row, so it stays put as the screen's width
-// changes and things fold and open. On leaving, the transcript is left in the terminal as it was last shown.
+// The screen is bee's own: the transcript, and under it what you have queued and the prompt, each set apart from the
+// one before by a blank row. The transcript is turns, each what you said and what came of it. Its answer is the last
+// thing bee said, if nothing came after it, and is shown whole as it comes. Before it is the work: what bee thought and
+// ran, and what it said on the way. While bee works, the work is shown, each thing as its first row, and clicking it
+// shows all of it: the whole thought, or the whole command and what it printed. Once the turn is over, ended or
+// stopped, the work folds away behind what you said, and clicking what you said or the answer unfolds it. The wheel
+// scrolls, and at the bottom the transcript follows what comes. Where you have scrolled to is a place in what was said,
+// not a row, so it stays put as the screen's width changes and things fold and open. On leaving, the transcript is left
+// in the terminal as it was last shown.
 
 type Option = { id: string; currentValue: string; options: { value: string }[] };
 
@@ -446,9 +447,7 @@ function draw() {
   const below = input.length - before.length + listed.length + (more ? 1 : 0);
   const turning = spinner[Math.floor(Date.now() / frame) % spinner.length];
   const rows = layout();
-  const prompt = [
-    ...queued.map((text) => amber(mark) + dark(text.split("\n")[0].slice(0, room()))),
-    ...(rows.length || queued.length ? [""] : []),
+  const typing = [
     amber(busy() ? turning + " " : mark) + input[0],
     ...input.slice(1).map((row) => pad + row),
     ...listed.map((hint) => {
@@ -459,6 +458,12 @@ function draw() {
     }),
     ...(more ? [pad + " ".repeat(from) + dark(`${more} more`)] : []),
   ];
+  const waiting = queued.map((text) => amber(mark) + dark(text.split("\n")[0].slice(0, room())));
+  const prompt: string[] = []; // all under the transcript, each part set apart from the one before by a blank row
+  for (const own of [waiting, typing]) {
+    if (own.length && (rows.length || prompt.length)) prompt.push("");
+    prompt.push(...own);
+  }
   const height = Math.max(0, out.rows - prompt.length);
   laid = rows;
   bottom = Math.max(0, rows.length - height);
