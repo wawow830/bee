@@ -73,7 +73,9 @@ type Result = {
   isError: boolean;
   timestamp: number;
 };
-type Message = System | User | Reply | Result;
+/** What is said once the session has begun. */
+type Said = User | Reply | Result;
+type Message = System | Said;
 
 /** What bee says in a tool's answer, set apart from all a command wrote. */
 const bee = (words: string) => `(bee: ${words})`;
@@ -251,7 +253,7 @@ const STOPS: Record<string, "stop" | "length" | "toolUse"> = {
  */
 const anthropic: Api = {
   request(model, messages, { thinking, cache }) {
-    const [system, ...rest] = messages as [System, ...Message[]];
+    const [system, ...rest] = messages as [System, ...Said[]];
     const oauth = model.apiKey.includes("sk-ant-oat");
     const mark =
       cache === "none" ? {} : { cache_control: { type: "ephemeral", ...(cache === "long" && { ttl: "1h" }) } };
@@ -272,11 +274,10 @@ const anthropic: Api = {
         ? [{ type: "redacted_thinking", data: block.thinkingSignature }]
         : [{ type: "thinking", thinking: block.thinking, signature: block.thinkingSignature }];
     };
-    const wire = (message: Message): { role: string; content: object[] } => {
+    const wire = (message: Said): { role: string; content: object[] } => {
       if (message.role === "assistant")
         return { role: "assistant", content: message.content.flatMap((block) => said(block, message)) };
       if (message.role === "user") return { role: "user", content: media(message.content) };
-      if (message.role === "system") return { role: "user", content: [] };
       const content = textual(message.content) ?? media(message.content);
       return {
         role: "user",
@@ -401,7 +402,7 @@ function account(token: string): string {
 /** OpenAI's Responses, as Codex takes them. The session is the cache's key. */
 const codex: Api = {
   request(model, messages, { sessionId, thinking, cache }) {
-    const [system, ...rest] = messages as [System, ...Message[]];
+    const [system, ...rest] = messages as [System, ...Said[]];
     const media = (content: User["content"]) =>
       blocks(content).map((block) =>
         block.type === "text"
@@ -431,10 +432,9 @@ const codex: Api = {
       const content = [{ type: "output_text", text: block.text, annotations: [] }];
       return [{ type: "message", role: "assistant", content, status: "completed", id, phase }];
     };
-    const wire = (message: Message): object[] => {
+    const wire = (message: Said): object[] => {
       if (message.role === "assistant") return message.content.flatMap((block) => said(block, message));
       if (message.role === "user") return [{ role: "user", content: media(message.content) }];
-      if (message.role === "system") return [];
       const output = textual(message.content) ?? media(message.content);
       return [{ type: "function_call_output", call_id: callId(message.toolCallId.split("|")[0]), output }];
     };
