@@ -56,7 +56,6 @@ type User = { role: "user"; content: string | (Text | Image)[]; timestamp: numbe
 type Reply = {
   role: "assistant";
   content: (Text | Thinking | Call)[];
-  api: string;
   provider: string;
   model: string;
   usage: Usage;
@@ -91,34 +90,34 @@ const result = (call: Call, content: Result["content"], isError: boolean): Resul
 });
 
 // ── The APIs ────────────────────────────────────────────────────────────────
-// bee speaks to models itself, in two APIs: Anthropic's Messages, and OpenAI's Responses as Codex takes them. Each
-// makes a request of the conversation, and a reply of the events it streams back.
+// bee speaks to two providers itself, each in its API: Anthropic, in its Messages, and Codex, in OpenAI's Responses.
+// Each lists the models it has, makes a request of the conversation, and a reply of the events it streams back.
 
+/** The thinking levels the APIs take, least first. A model has those its provider lists. */
 const LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const CACHES = ["none", "short", "long"] as const;
 type Level = (typeof LEVELS)[number];
 type Cache = (typeof CACHES)[number];
 
-/** A model as pi.dev lists it, with the key and address of its provider. */
-type Model = {
-  provider: string;
-  id: string;
-  name: string;
-  api: string;
-  baseUrl: string;
-  apiKey: string;
-  reasoning: boolean;
-  contextWindow: number;
-  maxTokens: number;
-  /** What the API calls each level; null for a level the model does not have. */
-  thinkingLevelMap?: Partial<Record<Level, string | null>>;
-  compat?: { forceAdaptiveThinking?: boolean };
-};
+/** A provider's key, and where it is. */
+type Key = { apiKey: string; baseUrl: string };
+
+/** A model as its provider lists it: its levels, least first, and `listed`, all the provider says of it. */
+type Listed = { id: string; name: string; contextWindow: number; levels: Level[]; listed: any };
+
+/** A model, with its provider's key. */
+type Model = Listed & Key & { provider: string };
 
 /** `origin`: how the session began, the same in each of its forks. Codex keeps its cache by it. */
 type Options = { origin: string; thinking: Level; cache: Cache; signal: AbortSignal };
 type Tell = (type: "text" | "thinking", words: string) => void;
 type Api = {
+  /** Where the provider is, unless models.json says. */
+  baseUrl: string;
+  /** How to ask the provider for its models. */
+  listing(key: Key): { url: string; headers: Record<string, string> };
+  /** The models in what it listed, each with its levels. */
+  models(listing: any): Listed[];
   request(
     model: Model,
     messages: Message[],
@@ -130,13 +129,12 @@ type Api = {
 
 /** One reply from a model, its words and thoughts told as they come. One that fails or is stopped says so. */
 async function stream(model: Model, messages: Message[], chosen: Options, tell: Tell): Promise<Reply> {
-  const api = APIS[model.api];
+  const api = PROVIDERS[model.provider];
   const { provider, id } = model;
   const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
   const reply: Reply = {
     role: "assistant",
     content: [],
-    api: model.api,
     provider,
     model: id,
     usage,
@@ -222,8 +220,8 @@ async function* events(body: ReadableStream<Uint8Array>) {
   }
 }
 
-/** Whether a reply was written in a model's API, so its thinking and the ids it gave can be sent back to it. */
-const native = (reply: Reply, model: Model) => reply.api === model.api;
+/** Whether a reply is of a model's provider, so its thinking and the ids it gave can be sent back to it. */
+const native = (reply: Reply, model: Model) => reply.provider === model.provider;
 
 /** What the user said, as blocks. */
 const blocks = (content: User["content"]): (Text | Image)[] =>
@@ -238,7 +236,6 @@ const textual = (content: Result["content"]) =>
 /** A tool call's id as an API takes it: letters, digits, _ and -, at most 64. */
 const callId = (id: string) => id.replace(/[^\w-]/g, "_").slice(0, 64);
 
-const BUDGETS: Partial<Record<Level, number>> = { minimal: 1024, low: 2048, medium: 8192, high: 16384 };
 const STOPS: Record<string, "stop" | "length" | "toolUse"> = {
   end_turn: "stop",
   pause_turn: "stop",
@@ -247,14 +244,34 @@ const STOPS: Record<string, "stop" | "length" | "toolUse"> = {
   tool_use: "toolUse",
 };
 
+/** Whether an Anthropic key is an OAuth token, which the API takes only from Claude Code. */
+const oauth = (apiKey: string) => apiKey.includes("sk-ant-oat");
+
+/** Anthropic's headers for a key. */
+const anthropicHeaders = (apiKey: string) => ({
+  "anthropic-version": "2023-06-01",
+  ...(oauth(apiKey)
+    ? { authorization: `Bearer ${apiKey}`, "anthropic-beta": "oauth-2025-04-20" }
+    : { "x-api-key": apiKey }),
+});
+
 /**
- * Anthropic's Messages. The prompt with the tool, and the conversation, are each cached to their end. A key that is an
- * OAuth token, one with sk-ant-oat in it, is sent as Claude Code, as the API takes one only from it.
+ * Anthropic's Messages. A model thinks at the efforts it lists, and off if it lists that. The prompt with the tool, and
+ * the conversation, are each cached to their end. An OAuth token is sent as Claude Code.
  */
 const anthropic: Api = {
+  baseUrl: "https://api.anthropic.com",
+  listing: ({ baseUrl, apiKey }) => ({ url: `${baseUrl}/v1/models?limit=1000`, headers: anthropicHeaders(apiKey) }),
+  models: (listing) =>
+    (listing.data ?? []).map((listed: any) => {
+      const { thinking, effort } = listed.capabilities;
+      const has = (level: Level) => (level === "off" ? thinking?.types?.disabled : effort?.[level])?.supported;
+      const { id, display_name: name, max_input_tokens: contextWindow } = listed;
+      return { id, name, contextWindow, levels: LEVELS.filter(has), listed };
+    }),
+
   request(model, messages, { thinking, cache }) {
     const [system, ...rest] = messages as [System, ...Said[]];
-    const oauth = model.apiKey.includes("sk-ant-oat");
     const mark =
       cache === "none" ? {} : { cache_control: { type: "ephemeral", ...(cache === "long" && { ttl: "1h" }) } };
     const media = (content: User["content"]) =>
@@ -292,27 +309,18 @@ const anthropic: Api = {
     }
     Object.assign(dialogue.at(-1)?.content.at(-1) ?? {}, mark);
     const identity = { type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." };
-    const effort = model.thinkingLevelMap?.[thinking] ?? (thinking === "minimal" ? "low" : thinking);
-    const reasoning = !model.reasoning
-      ? {}
-      : thinking === "off"
+    const reasoning =
+      thinking === "off"
         ? { thinking: { type: "disabled" } }
-        : model.compat?.forceAdaptiveThinking
-          ? { thinking: { type: "adaptive", display: "summarized" }, output_config: { effort } }
-          : { thinking: { type: "enabled", budget_tokens: BUDGETS[thinking], display: "summarized" } };
+        : { thinking: { type: "adaptive", display: "summarized" }, output_config: { effort: thinking } };
     return {
       url: `${model.baseUrl}/v1/messages`,
-      headers: {
-        "anthropic-version": "2023-06-01",
-        ...(oauth
-          ? { authorization: `Bearer ${model.apiKey}`, "anthropic-beta": "oauth-2025-04-20" }
-          : { "x-api-key": model.apiKey }),
-      },
+      headers: anthropicHeaders(model.apiKey),
       body: {
         model: model.id,
-        max_tokens: model.maxTokens,
+        max_tokens: model.listed.max_tokens,
         stream: true,
-        system: [...(oauth ? [identity] : []), { type: "text", text: system.content, ...mark }],
+        system: [...(oauth(model.apiKey) ? [identity] : []), { type: "text", text: system.content, ...mark }],
         tools: system.toolsAdded.map(({ name, description, parameters }) => ({
           name,
           description,
@@ -399,8 +407,29 @@ function account(token: string): string {
   throw new Error("The key is not a ChatGPT token: it names no account.");
 }
 
-/** OpenAI's Responses, as Codex takes them. How the session began is the cache's key, so a fork begins cached. */
+/** Codex's headers for a key. */
+const codexHeaders = (apiKey: string) => ({ authorization: `Bearer ${apiKey}`, "chatgpt-account-id": account(apiKey) });
+
+/**
+ * OpenAI's Responses, as Codex takes them. Its models are those it lists to be shown, at the efforts each lists. It
+ * lists a model only to a client as new as the model asks, so bee says it is newer than any. How the session began is
+ * the cache's key, so a fork begins cached.
+ */
 const codex: Api = {
+  baseUrl: "https://chatgpt.com/backend-api/codex",
+  listing: ({ baseUrl, apiKey }) => ({
+    url: `${baseUrl}/models?client_version=999.0.0`,
+    headers: codexHeaders(apiKey),
+  }),
+  models: (listing) =>
+    (listing.models ?? [])
+      .filter((listed: any) => listed.visibility === "list")
+      .map((listed: any) => {
+        const efforts = listed.supported_reasoning_levels.map((level: any) => level.effort);
+        const { slug: id, display_name: name, context_window: contextWindow } = listed;
+        return { id, name, contextWindow, levels: LEVELS.filter((level) => efforts.includes(level)), listed };
+      }),
+
   request(model, messages, { origin, thinking, cache }) {
     const [system, ...rest] = messages as [System, ...Said[]];
     const media = (content: User["content"]) =>
@@ -438,13 +467,10 @@ const codex: Api = {
       const output = textual(message.content) ?? media(message.content);
       return [{ type: "function_call_output", call_id: callId(message.toolCallId.split("|")[0]), output }];
     };
-    const effort =
-      thinking === "off" ? (model.thinkingLevelMap?.off ?? "none") : (model.thinkingLevelMap?.[thinking] ?? thinking);
     return {
-      url: `${model.baseUrl.replace(/\/codex$/, "")}/codex/responses`,
+      url: `${model.baseUrl}/responses`,
       headers: {
-        authorization: `Bearer ${model.apiKey}`,
-        "chatgpt-account-id": account(model.apiKey),
+        ...codexHeaders(model.apiKey),
         "openai-beta": "responses=experimental",
         originator: "bee",
         "session-id": origin,
@@ -464,7 +490,7 @@ const codex: Api = {
         })),
         include: ["reasoning.encrypted_content"],
         ...(cache !== "none" && { prompt_cache_key: origin }),
-        ...(model.reasoning && { reasoning: { effort, ...(thinking !== "off" && { summary: "auto" }) } }),
+        reasoning: { effort: thinking, summary: "auto" },
       },
     };
   },
@@ -520,23 +546,25 @@ const codex: Api = {
   },
 };
 
-const APIS: Record<string, Api> = { "anthropic-messages": anthropic, "openai-codex-responses": codex };
+/** The providers bee speaks to, by the names models.json gives them. */
+const PROVIDERS: Record<string, Api> = { anthropic, "openai-codex": codex };
 
 // ── Models ──────────────────────────────────────────────────────────────────
 
-/** models.json, as pi writes it: {"providers": {"anthropic": {"apiKey": "...", "baseUrl": "..."}}}. */
+/** models.json: {"providers": {"anthropic": {"apiKey": "...", "baseUrl": "..."}}}. */
 const MODELS = join(HOME, "models.json");
 const keys: Record<string, { apiKey: string; baseUrl?: string }> = JSON.parse(read(MODELS, "{}")).providers ?? {};
 
 /**
- * Each provider's models as pi.dev lists them. bee starts with the list it fetched last, and fetches it again without
- * waiting, for the next start; a provider it has none of yet waits for it.
+ * What each provider listed last. bee starts with it, and asks again without waiting, for the next start; a provider
+ * it has no models of yet, it waits for.
  */
 const CATALOG = join(HOME, "catalog");
 const catalog = (provider: string) => join(CATALOG, `${provider}.json`);
 
-async function fetchCatalog(provider: string) {
-  const response = await fetch(`https://pi.dev/api/models/providers/${provider}`);
+async function fetchCatalog(provider: string, key: Key) {
+  const { url, headers } = PROVIDERS[provider].listing(key);
+  const response = await fetch(url, { headers });
   if (!response.ok) return;
   const json = JSON.stringify(await response.json());
   const temporary = `${catalog(provider)}.${process.pid}`;
@@ -545,38 +573,30 @@ async function fetchCatalog(provider: string) {
   renameSync(temporary, catalog(provider));
 }
 
-async function listed(provider: string): Promise<Model[]> {
-  const fetched = fetchCatalog(provider).catch(() => {});
-  if (!existsSync(catalog(provider))) await fetched;
-  return Object.values(JSON.parse(read(catalog(provider), "{}")));
+async function listed(provider: string, key: Key): Promise<Model[]> {
+  const fetched = fetchCatalog(provider, key).catch(() => {});
+  const models = () => PROVIDERS[provider].models(JSON.parse(read(catalog(provider), "{}")));
+  if (!models().length) await fetched;
+  return models().map((model) => ({ ...model, ...key, provider }));
 }
 
 const ref = (model: Model) => `${model.provider}/${model.id}`;
 const byName = new Intl.Collator("en", { numeric: true }).compare;
 
-/** The models of every provider with a key, that speak an API bee does, in order of their names. */
+/** The models of every provider bee speaks to that has a key, in order of their names. */
 const providers = await Promise.all(
-  Object.entries(keys).map(async ([provider, { apiKey, baseUrl }]) =>
-    (await listed(provider))
-      .filter((model) => model.api in APIS)
-      .map((model) => ({ ...model, apiKey, baseUrl: baseUrl ?? model.baseUrl })),
-  ),
+  Object.entries(keys)
+    .filter(([provider]) => provider in PROVIDERS)
+    .map(([provider, { apiKey, baseUrl }]) =>
+      listed(provider, { apiKey, baseUrl: baseUrl ?? PROVIDERS[provider].baseUrl }),
+    ),
 );
 const available = providers.flat().sort((a, b) => byName(ref(a), ref(b)));
-
-/** A model's thinking levels: off alone if it does not think, and none its API calls null. xhigh and max it names. */
-const levels = (model: Model): Level[] =>
-  model.reasoning
-    ? LEVELS.filter((level) => {
-        const named = model.thinkingLevelMap?.[level];
-        return level === "xhigh" || level === "max" ? typeof named === "string" : named !== null;
-      })
-    : ["off"];
 
 /** The level a model has that is nearest the one asked for: it, or the nearest above, or else below. */
 function nearest(model: Model, level: Level) {
   const at = LEVELS.indexOf(level);
-  return [...LEVELS.slice(at), ...LEVELS.slice(0, at).reverse()].find((one) => levels(model).includes(one))!;
+  return [...LEVELS.slice(at), ...LEVELS.slice(0, at).reverse()].find((one) => model.levels.includes(one))!;
 }
 
 // ── Sessions ────────────────────────────────────────────────────────────────
@@ -933,7 +953,7 @@ function replay(sid: string) {
 function options(sid: string) {
   const { model, thinking } = settings(sid);
   const all = available.map((one) => ({ value: ref(one), name: one.name }));
-  const thinkings = levels(model).map((level) => ({ value: level, name: level }));
+  const thinkings = model.levels.map((level) => ({ value: level, name: level }));
   return [
     { id: "model", name: "Model", category: "model", currentValue: ref(model), options: all },
     { id: "thinking", name: "Thinking", category: "thought_level", currentValue: thinking, options: thinkings },

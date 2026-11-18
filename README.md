@@ -10,19 +10,20 @@ Two files: `bee.ts` is the harness, `cli.ts` is a terminal for it. They need not
 Point an ACP client at `bee.ts`. In T3 Code: **Settings → Providers → Add provider → Show more → Local ACP command**,
 with the path to `bee.ts` as the executable.
 
-Providers go in `~/.bee/agent/models.json`, in the format pi uses:
+Providers go in `~/.bee/agent/models.json`: `anthropic`, spoken to in its Messages API, and `openai-codex`, in OpenAI's
+Responses as Codex takes them.
 
 ```json
-{ "providers": { "anthropic": { "apiKey": "...", "baseUrl": "https://..." } } }
+{ "providers": { "anthropic": { "apiKey": "..." }, "openai-codex": { "apiKey": "...", "baseUrl": "https://..." } } }
 ```
 
-`baseUrl` is optional. An Anthropic key that is an OAuth token, one with `sk-ant-oat` in it, is sent as Claude Code,
-as the API takes one only from it: its prompt begins with Claude Code's first line.
+`baseUrl` is optional: without it, `https://api.anthropic.com` and `https://chatgpt.com/backend-api/codex`. An Anthropic
+key that is an OAuth token, one with `sk-ant-oat` in it, is sent as Claude Code, as the API takes one only from it: its
+prompt begins with Claude Code's first line.
 
-The models are those [pi.dev](https://pi.dev) lists for each provider, in the APIs bee speaks: Anthropic's Messages,
-and OpenAI's Responses as Codex takes them. bee starts with the lists it fetched last, in `~/.bee/agent/catalog`, and
-fetches them again without waiting, so a new model is there the next time. A provider it has no list of yet, it waits
-for.
+The models are those each provider lists, each at the thinking levels listed for it that its API takes. bee starts with
+the lists it got last, in `~/.bee/agent/catalog`, and asks again without waiting, so a new model is there the next time.
+A provider it has no models of yet, it waits for.
 
 | Variable   | Meaning                                               |
 | ---------- | ----------------------------------------------------- |
@@ -32,7 +33,7 @@ Defaults go in `~/.bee/agent/settings.json`, and a session begins with them. Wit
 `medium`, and a five-minute cache:
 
 ```json
-{ "model": "anthropic/claude-opus-4-5", "thinking": "high", "cache": "long" }
+{ "model": "anthropic/claude-opus-5-5", "thinking": "high", "cache": "long" }
 ```
 
 Model and thinking level can be changed per session from the editor.
@@ -103,9 +104,8 @@ The model sees an image by writing it, as with `cat`.
 
 **bee speaks to the models itself.** A request is the file's messages, as the API takes them: a reply that failed or was
 stopped is left out, a call nothing answered is answered "(bee: not run)", an answer that says nothing says
-"(bee: no output)", and thinking and the ids a model gave are sent back to any model of the API they were written in.
-The prompt and the conversation are each cached to their end, and Codex keeps the cache by how the session began, so a
-fork shares it.
+"(bee: no output)", and thinking and the ids a model gave are sent back to any model of its provider. The prompt and the
+conversation are each cached to their end, and Codex keeps the cache by how the session began, so a fork shares it.
 
 **The provider is the judge.** A request it refuses as it is, it would refuse again, so what commands returned since the
 last reply is sent as "(bee: provider refused: <why>)" from then on, and the turn asks again. So a session never holds
