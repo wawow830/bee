@@ -662,17 +662,12 @@ async function forkFrom(cursorId: string, text: string) {
   splice(0, typed.length, [text, typed].filter(Boolean).join("\n\n"));
 }
 
-/** What this terminal says of a turn that did not end of itself, by how bee says it ended. */
-const endings: Record<string, string> = { cancelled: "stopped", max_tokens: "cut off at the most the model can say" };
-
 /** Send bee a prompt, and wait for its turn to end. One sent while a turn is under way joins it, once bee hears it. */
 async function prompt(text: string) {
   unheard.push(text);
   prompts++;
-  let ends = false; // whether this answer ends the turn, which answers each prompt in it
-  const done = () => (ends = !--prompts) && end();
-  const { stopReason } = await call("session/prompt", { sessionId, prompt: [{ type: "text", text }] }).finally(done);
-  if (ends && endings[stopReason]) note(endings[stopReason]);
+  const done = () => !--prompts && end(); // the turn answers each prompt in it, and is over at the last
+  await call("session/prompt", { sessionId, prompt: [{ type: "text", text }] }).finally(done);
 }
 
 /** Wait for the turn to end, and for what was queued before; then say `text`, or, for a command, `pick` its value. */
