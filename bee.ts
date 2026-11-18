@@ -97,6 +97,7 @@ const SESSIONS = join(HOME, "sessions");
 const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
 
 const SHOWN = 12_000; // characters of output the model sees per call
+const SEEN = 3_932_160; // bytes of an image the model sees: 5 MiB in base64, the most Anthropic takes
 
 const BASH = {
   name: "bash",
@@ -271,16 +272,22 @@ async function bash(sid: string, command: string, signal: AbortSignal) {
     // Every command starts in the session's directory. One that ends elsewhere is told so, as Claude Code tells it.
     const ended = read(left).trim();
     const reset = ended && ended !== cwd ? `Shell cwd was reset to ${cwd}` : "";
-    const text = [written.toString("utf8").trimEnd(), reset].filter(Boolean).join("\n") || "(no output)";
+    // An image larger is told by its size, so the session never holds one a request would be refused for.
+    const big =
+      `[${mimeType} of ${written.length.toLocaleString("en")} bytes, ` +
+      `more than the ${SEEN.toLocaleString("en")} seen]`;
+    const output = mimeType ? big : written.toString("utf8").trimEnd();
+    const text = [output, reset].filter(Boolean).join("\n") || "(no output)";
     const cut = text.length - SHOWN;
-    const content: ToolResultMessage["content"] = mimeType
-      ? [{ type: "image", data: written.toString("base64"), mimeType }]
-      : [
-          {
-            type: "text",
-            text: cut <= 0 ? text : `${text.slice(0, SHOWN / 2)}\n[${cut} characters cut]\n${text.slice(-SHOWN / 2)}`,
-          },
-        ];
+    const content: ToolResultMessage["content"] =
+      mimeType && written.length <= SEEN
+        ? [{ type: "image", data: written.toString("base64"), mimeType }]
+        : [
+            {
+              type: "text",
+              text: cut <= 0 ? text : `${text.slice(0, SHOWN / 2)}\n[${cut} characters cut]\n${text.slice(-SHOWN / 2)}`,
+            },
+          ];
     return { content, failed: status !== 0 };
   } finally {
     signal.removeEventListener("abort", interrupt);
