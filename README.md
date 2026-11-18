@@ -75,8 +75,8 @@ Closing the editor or the terminal stops a turn as Esc does, so what was said an
 harness reads the file before every step and keeps no other state. For each setting, `{model}`, `{thinking}` or
 `{cache}`, the latest line holds.
 
-**One tool.** `bash`: "Every command starts in the working directory. Returns the output, cut at 8,000 characters, or
-the image written." What a command wrote is passed through: text, cut to its first lines within 8,000 characters, or an
+**One tool.** `bash`: "Every command starts in the working directory. Returns the output, cut at 20,000 characters, or
+the image written." What a command wrote is passed through: text, cut to its first lines within 20,000 characters, or an
 image. All bee says is apart from it, as "(bee: …)":
 "(bee: <n> characters not shown, full output in <file>)", "(bee: no output)" and
 "(bee: output is of unsupported format)"; and where a call cannot run, "(bee: tool does not exist)",
