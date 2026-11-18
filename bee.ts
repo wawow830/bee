@@ -701,6 +701,7 @@ const turns = new Map<string, Turn>();
 /** Write what the user said that the turn has not read, in the order it was said. */
 const hear = (sid: string, said: User[]) => {
   for (const message of said.splice(0)) append(sid, { message });
+  named(sid);
 };
 
 /**
@@ -828,6 +829,18 @@ const usage = (sid: string, reply: Reply) =>
     size: settings(sid).model.contextWindow,
   });
 
+/** What the session is called: the start of the first line the user said in it. */
+const title = (sid: string) => {
+  const first = conversation(sid).find((message) => message.role === "user")?.content ?? "";
+  return plain(first).trim().split("\n")[0].slice(0, 80) || undefined;
+};
+
+/** What the session is called, once the user has said something in it. */
+const named = (sid: string) => {
+  const called = title(sid);
+  if (called) update(sid, { sessionUpdate: "session_info_update", title: called });
+};
+
 /** A message's content, as plain text. */
 const plain = (content: string | { type: string; text?: string }[]) =>
   typeof content === "string" ? content : content.map((block) => block.text ?? "").join("");
@@ -891,14 +904,13 @@ function options(sid: string) {
   ].map((option) => ({ type: "select", ...option }));
 }
 
-/** The sessions, latest first. One's title is the start of what the user first said in it. */
+/** The sessions, latest first. */
 function list(cwd?: string) {
   return readdirSync(SESSIONS)
     .flatMap((name) => /^([\w-]+)\.jsonl$/.exec(name)?.[1] ?? [])
     .map((sessionId) => {
-      const first = conversation(sessionId).find((message) => message.role === "user")?.content ?? "";
       const updatedAt = statSync(file(sessionId)).mtime.toISOString();
-      return { sessionId, cwd: cwdOf(sessionId), title: plain(first).slice(0, 80) || undefined, updatedAt };
+      return { sessionId, cwd: cwdOf(sessionId), title: title(sessionId), updatedAt };
     })
     .filter((session) => !cwd || session.cwd === cwd)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -921,9 +933,10 @@ const parts = (blocks: any[]): User["content"] =>
         : { type: "text", text: block.text ?? block.uri ?? "" },
   );
 
-/** A session the editor opens, and how full its context was at the last reply counted. */
+/** A session the editor opens, what it is called, and how full its context was at the last reply counted. */
 function open(sessionId: string) {
   const last = conversation(sessionId).findLast(counted);
+  named(sessionId);
   if (last) usage(sessionId, last);
   return { sessionId, configOptions: options(sessionId) };
 }

@@ -304,6 +304,7 @@ let cursor = 0; // where the cursor is in it
 let tabbed = ""; // what you typed, while Tab goes through what fits it
 let writing: { said: "thought" | "reply"; text: string; whole: boolean } | undefined; // what bee is thinking or saying
 let usage = ""; // how full its context is
+let name = ""; // what the session is called
 let options: Option[] = []; // the session's settings
 let prompts = 0; // how many bee has not answered: a turn is under way while there are any
 let top: Place | undefined; // where the screen begins, once you have scrolled; else it follows the transcript
@@ -427,7 +428,7 @@ function layout() {
 
 /** What a command is set to, shown beside it as a hint. */
 function current(id: string) {
-  if (id === "session") return usage && `${usage} of context`;
+  if (id === "session") return [usage, name && `"${name}"`, sessionId].filter(Boolean).join(" ");
   return options.find((option) => option.id === id)?.currentValue ?? "";
 }
 
@@ -533,6 +534,7 @@ type Update = {
   status: string;
   used: number;
   size: number;
+  title: string;
 };
 
 const updates: Record<string, (update: Update) => void> = {
@@ -558,6 +560,10 @@ const updates: Record<string, (update: Update) => void> = {
   },
   usage_update: ({ used, size }) => {
     usage = `${Math.ceil((100 * used) / size)}%`;
+    draw();
+  },
+  session_info_update: ({ title }) => {
+    name = title;
     draw();
   },
 };
@@ -608,6 +614,7 @@ const stop = () => send({ method: "session/cancel", params: { sessionId } });
 /** Open the session named, showing what was said in it, or else a new one. */
 async function open(id?: string) {
   usage = "";
+  name = "";
   const opened = await call(id ? "session/load" : "session/new", { sessionId: id, cwd, mcpServers: [] });
   sessionId = id ?? opened.sessionId;
   options = opened.configOptions;
@@ -655,8 +662,6 @@ function named(values: [string, () => Promise<unknown>][]) {
   return map;
 }
 
-const title = (session: Session) => session.title!.trim().split("\n")[0];
-
 /** Each command. A session is named by its title, so of those alike the latest; and `new` is always a new one. */
 function commands(): Command[] {
   const settings = options.map((option) => ({
@@ -674,7 +679,7 @@ function commands(): Command[] {
     id: "session",
     values: named([
       ["new", () => open()],
-      ...others.map((other): [string, () => Promise<void>] => [title(other), () => open(other.sessionId)]),
+      ...others.map((other): [string, () => Promise<void>] => [other.title!, () => open(other.sessionId)]),
     ]),
   };
   return [...settings, session];
