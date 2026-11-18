@@ -30,6 +30,15 @@ const failure = (code: number, message: string) => Object.assign(new Error(messa
 const HOME = process.env.BEE_HOME ?? join(homedir(), ".bee", "agent");
 const read = (path: string, otherwise = "") => (existsSync(path) ? readFileSync(path, "utf8") : otherwise);
 
+/** A line as JSON. One that is not JSON is empty. */
+function parse(line: string) {
+  try {
+    return JSON.parse(line) ?? {};
+  } catch {
+    return {};
+  }
+}
+
 // ── Messages ────────────────────────────────────────────────────────────────
 // What a session's file holds: what was said, by the user, the model and the tool.
 
@@ -605,13 +614,6 @@ function lines(sid: string): Line[] {
   const held = unborn.get(sid);
   if (held) return held;
   if (!/^[\w-]+$/.test(sid) || !existsSync(file(sid))) throw failure(-32002, `No session ${sid}`);
-  const parse = (json: string) => {
-    try {
-      return JSON.parse(json) ?? {};
-    } catch {
-      return {};
-    }
-  };
   return read(file(sid)).trimEnd().split("\n").map(parse);
 }
 
@@ -954,12 +956,12 @@ process.stdout.on("error", () => {});
 
 mkdirSync(SESSIONS, { recursive: true, mode: 0o700 });
 for await (const line of createInterface({ input: process.stdin })) {
-  const { id, method, params } = JSON.parse(line);
-  if (!method) continue; // a reply, and we ask nothing
+  const { id, method, params } = parse(line);
+  if (!method) continue; // a reply, and we ask nothing; or not JSON
   const reply = (answer: object) => id !== undefined && send({ id, ...answer });
   const unknown = () => Promise.reject(failure(-32601, `No method ${method}`));
   Promise.resolve(params ?? {})
-    .then(handlers[method] ?? unknown)
+    .then(Object.hasOwn(handlers, method) ? handlers[method] : unknown)
     .then(
       (result) => reply({ result: result ?? {} }),
       (error) => reply({ error: { code: Number.isInteger(error.code) ? error.code : -32603, message: error.message } }),
