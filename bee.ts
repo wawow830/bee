@@ -808,9 +808,9 @@ const update = (sessionId: string, fields: object) =>
 const say = (sid: string, who: "user_message" | "agent_message" | "agent_thought", words: string) =>
   words && update(sid, { sessionUpdate: `${who}_chunk`, content: { type: "text", text: words } });
 
-/** What the session is called: the start of the first line the user said in it. */
-const title = (sid: string) => {
-  const first = conversation(sid).find((message) => message.role === "user")?.content ?? "";
+/** What a conversation is called: the start of the first line the user said in it. */
+const title = (messages: Message[]) => {
+  const first = messages.find((message) => message.role === "user")?.content ?? "";
   return plain(first).trim().split("\n")[0].slice(0, 80) || undefined;
 };
 
@@ -819,8 +819,9 @@ const title = (sid: string) => {
  * is, as the last reply counted it. A reply that failed or was stopped first counted nothing.
  */
 function describe(sid: string) {
-  const called = title(sid);
-  const counted = conversation(sid).findLast(
+  const messages = conversation(sid);
+  const called = title(messages);
+  const counted = messages.findLast(
     (message): message is Reply => message.role === "assistant" && message.usage.totalTokens > 0,
   );
   const size = settings(sid).model.contextWindow;
@@ -897,7 +898,7 @@ function list(cwd?: string) {
     .flatMap((name) => /^([\w-]+)\.jsonl$/.exec(name)?.[1] ?? [])
     .map((sessionId) => {
       const updatedAt = statSync(file(sessionId)).mtime.toISOString();
-      return { sessionId, cwd: cwdOf(sessionId), title: title(sessionId), updatedAt };
+      return { sessionId, cwd: cwdOf(sessionId), title: title(conversation(sessionId)), updatedAt };
     })
     .filter((session) => !cwd || session.cwd === cwd)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
