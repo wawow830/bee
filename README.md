@@ -75,14 +75,13 @@ Closing the editor or the terminal stops a turn as Esc does, so what was said an
 harness reads the file before every step and keeps no other state. For each setting, `{model}`, `{thinking}` or
 `{cache}`, the latest line holds.
 
-**One tool.** `bash`: "Every command starts in the working directory. Returns the output: its text, cut at 12,000
-characters, and its images." One that ends elsewhere is told "Shell cwd was reset to <it>", as Claude Code tells it. The
-computer is what lasts: files, and whatever a command left running.
+**One tool.** `bash`: "Every command starts in the working directory. Returns the output, cut at 12,000 characters, or
+the image written." One that ends elsewhere is told "Shell cwd was reset to <it>", as Claude Code tells it. The computer
+is what lasts: files, and whatever a command left running.
 
-**An image is a file.** One pasted, in the editor or with Ctrl-V, is written to a file, and its path is what you said;
-the model sees it by writing it, as with `cat`. An image anywhere in what a command writes is taken out of its text, and
-shown as a model would see it: 1,568 pixels long at most, in its format, or JPEG if that is more than 5 MiB in base64.
-So the session holds no image a provider refuses, and one that cannot be read stays text.
+**An image is a file.** One pasted, in the editor or with Ctrl-V, is written to a file, and its path is what you said.
+The model sees an image by writing it, as with `cat`. One larger than a model is shown fails, so a session never holds
+one a provider would refuse.
 
 **The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model what
 to do. Instructions are yours, in `AGENTS.md`, from `~/.bee/agent` and every directory from the root down to the working

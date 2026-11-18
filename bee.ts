@@ -25,7 +25,6 @@ import {
   getSupportedThinkingLevels,
   type Api,
   type AssistantMessage,
-  type ImageContent,
   type Message,
   type Model,
   type ToolCall,
@@ -35,7 +34,6 @@ import {
 } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { CACHE_RETENTIONS, MODEL_THINKING_LEVELS } from "@earendil-works/pi-ai/providers/model-schema";
-import sharp from "sharp";
 import { version } from "./package.json";
 
 console.log = console.error; // stdout carries the protocol and nothing else
@@ -90,7 +88,7 @@ for (const provider of providers) fetchCatalog(provider).catch(() => {});
 // settings chosen. Lines are only appended, so every request begins with the
 // last one, and the provider's cache of it holds. The first line is how the
 // session began: its directory, the prompt and the tool, and the settings in
-// settings.json. The file is made when the first thing is said in it.
+// settings.json.
 
 type Settings = { model?: string; thinking?: string; cache?: string };
 type Line = Settings & { message?: Message; cwd?: string };
@@ -99,14 +97,13 @@ const SESSIONS = join(HOME, "sessions");
 const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
 
 const SHOWN = 12_000; // characters of output the model sees per call
-const SIDE = 1568; // pixels on an image's long side: as many as Anthropic sees, and fewer than any provider refuses
-const BYTES = 3_932_160; // bytes of an image: 5 MiB in base64, as many as Anthropic takes
+const SEEN = 3_932_160; // bytes of an image a model is shown: 5 MiB in base64, the most Anthropic takes
 
 const BASH = {
   name: "bash",
   description:
     "Every command starts in the working directory. " +
-    `Returns the output: its text, cut at ${SHOWN.toLocaleString("en")} characters, and its images.`,
+    `Returns the output, cut at ${SHOWN.toLocaleString("en")} characters, or the image written.`,
   parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
 };
 
@@ -133,13 +130,8 @@ const beginning = (cwd: string): Line => ({
   },
 });
 
-/** The lines of each session nothing has been said in yet, held until the first message writes them. */
-const unborn = new Map<string, Line[]>();
-
 /** A session's lines. One that is not JSON is empty. */
 function lines(sid: string): Line[] {
-  const held = unborn.get(sid);
-  if (held) return held;
   if (!/^[\w-]+$/.test(sid) || !existsSync(file(sid))) throw failure(-32002, `No session ${sid}`);
   const parse = (json: string) => {
     try {
@@ -152,22 +144,18 @@ function lines(sid: string): Line[] {
 }
 
 /**
- * Add a line to a session. The first message makes the file, with the lines held before it, so no file is a session
- * nothing was said in. Nothing else makes it, so a session deleted stays deleted: a line written to a new file would
- * be a session with no beginning, which no model will take and no one can list.
+ * Add a line to a session. Only its beginning makes the file, so a session deleted stays deleted: a line written
+ * to a new file would be a session with no beginning, which no model will take and no one can list.
  */
-function append(sid: string, line: Line) {
-  const held = unborn.get(sid);
-  if (held && !line.message) return void held.push(line);
+function append(sid: string, line: Line, flag: string | number = constants.O_WRONLY | constants.O_APPEND) {
   let fd: number;
   try {
-    fd = openSync(file(sid), held ? "wx" : constants.O_WRONLY | constants.O_APPEND);
+    fd = openSync(file(sid), flag);
   } catch (error: any) {
     throw error.code === "ENOENT" ? failure(-32002, `No session ${sid}`) : error;
   }
   try {
-    writeSync(fd, [...(held ?? []), line].map((one) => JSON.stringify(one) + "\n").join(""));
-    unborn.delete(sid);
+    writeSync(fd, JSON.stringify(line) + "\n");
   } finally {
     closeSync(fd);
   }
@@ -245,75 +233,23 @@ async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<str
         return reply.stopReason === "length" ? "max_tokens" : "end_turn";
     }
   } finally {
-    // However the turn ends, it is over first, so a write that fails cannot leave it under way for every prompt after
-    // to join; then all that was said is written, so none is left behind.
-    turns.delete(sid);
+    // However the turn ends, all that was said is written, in the same step as it is over, so none is left behind.
     hear(sid, said);
+    turns.delete(sid);
   }
 }
 
 // ── The tool ────────────────────────────────────────────────────────────────
 
-/** Where an image may start in what a command writes: PNG, JPEG, GIF or WebP. */
-const IMAGE = /\x89PNG\r\n\x1a\n|\xff\xd8\xff|GIF8[79]a|RIFF[^]{4}WEBP/g;
+/** The images a model can see, by how their bytes begin. */
+const IMAGES: Record<string, RegExp> = {
+  "image/png": /^\x89PNG/,
+  "image/jpeg": /^\xff\xd8\xff/,
+  "image/gif": /^GIF8/,
+  "image/webp": /^RIFF....WEBP/s,
+};
 
-/** Where the image that starts at `i` ends, read by its format's own lengths, or 0 if it does not. */
-function end(b: Buffer, i: number) {
-  let j = i;
-  const table = (flags: number) => flags & 0x80 && 3 << ((flags & 7) + 1); // a GIF's colours
-  const blocks = () => {
-    while (b[j]) j += b[j] + 1; // a GIF's data, in blocks each led by its length
-    j++;
-  };
-  try {
-    if (b[i] === 0x89) {
-      // PNG: chunks, each led by its length, to IEND
-      j += 8;
-      while (b.toString("latin1", j + 4, j + 8) !== "IEND") j += b.readUInt32BE(j) + 12;
-      j += 12;
-    } else if (b[i] === 0x52) {
-      // WebP: RIFF, led by its length
-      j += 8 + b.readUInt32LE(i + 4);
-    } else if (b[i] === 0x47) {
-      // GIF: a screen and its colours, then images and extensions, to the trailer
-      j += 13 + table(b[i + 10]);
-      while (b[j] !== 0x3b) {
-        if (b[j] === 0x21) j += 2;
-        else if (b[j] === 0x2c) j += 11 + table(b[j + 9]);
-        else return 0;
-        blocks();
-      }
-      j++;
-    } else {
-      // JPEG: segments, each led by its length, and after a scan its data, to EOI
-      j += 2;
-      while (b[j + 1] !== 0xd9) {
-        if (b[j] !== 0xff) return 0;
-        const marker = b[j + 1];
-        j += marker === 0xff ? 1 : 2 + b.readUInt16BE(j + 2); // a byte of fill, or a segment
-        if (marker === 0xda) while (j < b.length && !(b[j] === 0xff && b[j + 1] && (b[j + 1] & 0xf8) !== 0xd0)) j++;
-      }
-      j += 2;
-    }
-  } catch {
-    return 0;
-  }
-  return j <= b.length ? j : 0;
-}
-
-/** An image as a model is shown it: SIDE pixels long at most, in its format, or JPEG if that is more than BYTES. */
-async function see(bytes: Buffer): Promise<ImageContent | undefined> {
-  try {
-    const image = sharp(bytes).rotate().resize(SIDE, SIDE, { fit: "inside", withoutEnlargement: true });
-    const { format = "png" } = await image.metadata();
-    const kept = await image.clone().toFormat(format).toBuffer();
-    const fits = kept.length <= BYTES; // and a JPEG this size always does
-    const data = fits ? kept : await image.jpeg().toBuffer();
-    return { type: "image", data: data.toString("base64"), mimeType: `image/${fits ? format : "jpeg"}` };
-  } catch {}
-}
-
-/** Run a command. Returns what it wrote, as text cut to its two ends and the images in it, and whether it failed. */
+/** Run a command. Returns what it wrote, as an image or as text cut to its two ends, and whether it failed. */
 async function bash(sid: string, command: string, signal: AbortSignal) {
   // Written to a file, not a pipe, so the call ends when the command does, whatever it left running.
   const path = join(tmpdir(), `bee-${randomUUID()}`);
@@ -331,30 +267,29 @@ async function bash(sid: string, command: string, signal: AbortSignal) {
   try {
     const [status] = await once(child, "exit");
     const written = readFileSync(path);
-    // The images in it, wherever they are, taken out of its text.
-    const images: ImageContent[] = [];
-    const text: Buffer[] = [];
-    let rest = 0;
-    for (const { index } of written.toString("latin1").matchAll(IMAGE)) {
-      const after = index >= rest && end(written, index);
-      const image = after && (await see(written.subarray(index, after)));
-      if (!image) continue;
-      images.push(image);
-      text.push(written.subarray(rest, index));
-      rest = after;
-    }
-    text.push(written.subarray(rest));
+    const start = written.subarray(0, 12).toString("latin1");
+    const mimeType = Object.keys(IMAGES).find((type) => IMAGES[type].test(start));
     // Every command starts in the session's directory. One that ends elsewhere is told so, as Claude Code tells it.
     const ended = read(left).trim();
     const reset = ended && ended !== cwd ? `Shell cwd was reset to ${cwd}` : "";
-    const said = [Buffer.concat(text).toString("utf8").trimEnd(), reset].filter(Boolean).join("\n");
-    const cut = said.length - SHOWN;
-    const shown = cut <= 0 ? said : `${said.slice(0, SHOWN / 2)}\n[${cut} characters cut]\n${said.slice(-SHOWN / 2)}`;
-    const content: ToolResultMessage["content"] = [
-      ...(shown || !images.length ? [{ type: "text" as const, text: shown || "(no output)" }] : []),
-      ...images,
-    ];
-    return { content, failed: status !== 0 };
+    // An image larger fails, so the session never holds one a request would be refused for.
+    const big = !!mimeType && written.length > SEEN;
+    const bytes = written.length.toLocaleString("en");
+    const output = big
+      ? `The image is ${bytes} bytes; a model is shown at most ${SEEN.toLocaleString("en")}.`
+      : written.toString("utf8").trimEnd();
+    const text = [output, reset].filter(Boolean).join("\n") || "(no output)";
+    const cut = text.length - SHOWN;
+    const content: ToolResultMessage["content"] =
+      mimeType && !big
+        ? [{ type: "image", data: written.toString("base64"), mimeType }]
+        : [
+            {
+              type: "text",
+              text: cut <= 0 ? text : `${text.slice(0, SHOWN / 2)}\n[${cut} characters cut]\n${text.slice(-SHOWN / 2)}`,
+            },
+          ];
+    return { content, failed: status !== 0 || big };
   } finally {
     signal.removeEventListener("abort", interrupt);
     closeSync(out);
@@ -464,7 +399,7 @@ function options(sid: string) {
 /** The sessions, latest first. One's title is the start of what the user first said in it. */
 function list(cwd?: string) {
   return readdirSync(SESSIONS)
-    .flatMap((name) => /^([\w-]+)\.jsonl$/.exec(name)?.[1] ?? [])
+    .map((name) => name.slice(0, -".jsonl".length))
     .map((sessionId) => {
       const first = conversation(sessionId).find((message) => message.role === "user")?.content ?? "";
       const updatedAt = statSync(file(sessionId)).mtime.toISOString();
@@ -511,7 +446,7 @@ const handlers: Record<string, (params: any) => unknown> = {
   }),
   "session/new": ({ cwd }) => {
     const sessionId = randomUUID();
-    unborn.set(sessionId, [beginning(cwd)]);
+    append(sessionId, beginning(cwd), "wx");
     return open(sessionId);
   },
   "session/resume": ({ sessionId }) => open(sessionId),
