@@ -920,14 +920,15 @@ function replay(sid: string) {
   }
 }
 
-/** The settings the editor can change. Each one's id is its key in a line. */
+/** The settings, each as the editor changes it. Each one's id is its key in a line. */
 function options(sid: string) {
-  const { model, thinking } = settings(sid);
-  const all = available.map((one) => ({ value: ref(one), name: one.name }));
-  const thinkings = model.levels.map((level) => ({ value: level, name: level }));
+  const { model, thinking, cache } = settings(sid);
+  const models = available.map((one) => ({ value: ref(one), name: one.name }));
+  const [levels, caches] = [model.levels, CACHES].map((values) => values.map((value) => ({ value, name: value })));
   return [
-    { id: "model", name: "Model", category: "model", currentValue: ref(model), options: all },
-    { id: "thinking", name: "Thinking", category: "thought_level", currentValue: thinking, options: thinkings },
+    { id: "model", name: "Model", category: "model", currentValue: ref(model), options: models },
+    { id: "thinking", name: "Thinking", category: "thought_level", currentValue: thinking, options: levels },
+    { id: "cache", name: "Cache", currentValue: cache, options: caches },
   ].map((option) => ({ type: "select", ...option }));
 }
 

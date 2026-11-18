@@ -30,7 +30,7 @@ Defaults go in `~/.bee/agent/settings.json`, and a session begins with them. Wit
 { "model": "anthropic/claude-opus-5-5", "thinking": "high", "cache": "long" }
 ```
 
-Model and thinking level can be changed per session from the editor.
+Model, thinking and cache can be changed per session from the editor.
 
 ### In a terminal
 
@@ -53,12 +53,12 @@ The answer is shown whole as it comes. Once the turn is over, ended or stopped, 
 said, and clicking what you said or the answer unfolds it. The wheel scrolls, and Shift-drag selects. On quitting, the
 transcript is left in the terminal as it was last shown.
 
-`/model`, `/thinking`, `/session` and `/fork` each take a value: `/model opus` is the model with `opus` in its id,
-`/session` is `new` or the title of another session here, and `/fork` is something you said in this one. A value named
-whole, or without its provider, is the one meant, whatever its case. What fits is shown under the prompt as you type.
-Tab goes through it, and Enter sends the command once only one fits. Anything else that starts with `/`, such as a path,
-is a prompt. A setting chosen is kept in the session, but the command is not something said in it: it is shown dark, as
-what this terminal says, and Up does not recall it.
+`/model`, `/thinking`, `/cache`, `/session` and `/fork` each take a value: `/model opus` is the model with `opus` in its
+id, `/session` is `new` or the title of another session here, and `/fork` is something you said in this one. A value
+named whole, or without its provider, is the one meant, whatever its case. What fits is shown under the prompt as you
+type. Tab goes through it, and Enter sends the command once only one fits. Anything else that starts with `/`, such as a
+path, is a prompt. A setting chosen is kept in the session, but the command is not something said in it: it is shown
+dark, as what this terminal says, and Up does not recall it.
 
 A fork begins as this session did before what you said, set as it is now, with what you said back in the prompt to say
 again. The session left stays as it was, so each branch is a session, called by what was first said in it, and the
