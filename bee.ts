@@ -572,10 +572,11 @@ function nearest(model: Model, level: Level) {
 // A session is a file of lines, written as things happen, each one thing: how it began, something said, a setting
 // chosen, or the session it was forked from. Lines are only appended, so every request begins with the last one, and
 // the provider's cache of it holds. The first line is how the session began: its directory, the prompt and the tools,
-// with the settings in settings.json. The file is made when the first thing is said in it. A reply that runs commands is written with what they returned, in one write, so nothing comes
-// between a command and its output, from any editor. A fork is a session that begins as another did, up to where it
-// parts from it: its file begins with the other's lines up to there, then a line naming the session they are of, then
-// the settings chosen after there, so it is set as the other is.
+// with the settings in settings.json. The file is made when the first thing is said in it. A reply that runs commands
+// is written with what they returned, in one write, so nothing comes between a command and its output, from any
+// editor. A fork is a session that begins as another did, up to where it parts from it: its file begins with the
+// other's lines up to there, then a line naming the session they are of, then the settings chosen after there, so it
+// is set as the other is.
 
 const SETTINGS = ["model", "thinking", "cache"] as const;
 type Settings = Partial<Record<(typeof SETTINGS)[number], string>>;
@@ -631,9 +632,10 @@ function lines(sid: string): Line[] {
 }
 
 /**
- * Add a line to a session, and describe it as the file now says. The first thing said makes the file, with the lines held
- * before it, so no file is a session nothing was said in. Nothing else makes it, so a session deleted stays deleted: a
- * line written to a new file would be a session with no beginning, which no model will take and no one can list.
+ * Add a line to a session, and describe it as the file now says. The first thing said makes the file, with the lines
+ * held before it, so no file is a session nothing was said in. Nothing else makes it, so a session deleted stays
+ * deleted: a line written to a new file would be a session with no beginning, which no model will take and no one can
+ * list.
  */
 function append(sid: string, ...added: Line[]) {
   const held = unborn.get(sid);
