@@ -236,9 +236,10 @@ async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<str
         return reply.stopReason === "length" ? "max_tokens" : "end_turn";
     }
   } finally {
-    // However the turn ends, all that was said is written, in the same step as it is over, so none is left behind.
-    hear(sid, said);
+    // However the turn ends, it is over first, so a write that fails cannot leave it under way for every prompt after
+    // to join; then all that was said is written, so none is left behind.
     turns.delete(sid);
+    hear(sid, said);
   }
 }
 
