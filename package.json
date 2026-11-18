@@ -2,15 +2,15 @@
   "name": "bee",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
   "bin": {
     "bee": "cli.ts"
   },
   "scripts": {
-    "check": "tsc"
+    "check": "tsc && prettier --check ."
   },
   "devDependencies": {
-    "@types/bun": "latest",
+    "@types/bun": "^1.4.4",
+    "prettier": "^3.10.1",
     "typescript": "^7.0.2"
   },
   "prettier": {
