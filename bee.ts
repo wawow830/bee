@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 // bee: a minimal agent harness. ACP on stdio, one tool, one append-only file per session.
+import { isUtf8 } from "node:buffer";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
@@ -59,7 +60,8 @@ type Reply = {
   provider: string;
   model: string;
   usage: Usage;
-  stopReason: "stop" | "length" | "toolUse" | "error" | "aborted";
+  /** "refused": the provider refused the request as it was, so the same again it would refuse again. */
+  stopReason: "stop" | "length" | "toolUse" | "error" | "aborted" | "refused";
   errorMessage?: string;
   timestamp: number;
 };
@@ -73,9 +75,14 @@ type Result = {
 };
 type Message = System | User | Reply | Result;
 
-/** What stands where a tool said nothing, and where a call was not run. */
+/** What stands where a tool said nothing, where a call was not run, and where a command wrote neither. */
 const SILENT = "(no output)";
 const UNRUN = "(not run)";
+const NEITHER = "The output is neither text nor an image.";
+
+/** Whether a tool's answer shows the model an image. */
+const shows = (message: Message): message is Result =>
+  message.role === "toolResult" && message.content.some((block) => block.type === "image");
 
 const user = (content: User["content"]): User => ({ role: "user", content, timestamp: Date.now() });
 const result = (call: Call, content: Result["content"], isError: boolean): Result => ({
@@ -147,22 +154,28 @@ async function stream(model: Model, messages: Message[], chosen: Options, tell: 
       body: JSON.stringify(body),
       signal: chosen.signal,
     });
-    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+    const { status } = response;
+    if (!response.ok) throw Object.assign(new Error(`${status} ${await response.text()}`), { status });
     reply.stopReason = await api.read(events(response.body!), reply, tell);
   } catch (error: any) {
-    reply.stopReason = chosen.signal.aborted ? "aborted" : "error";
+    reply.stopReason = chosen.signal.aborted ? "aborted" : REFUSALS.includes(error.status) ? "refused" : "error";
     reply.errorMessage = error.message;
   }
   return reply;
 }
 
+/** The statuses of a request refused as it was: sent the same again, it would be refused again. */
+const REFUSALS = [400, 413];
+
 /**
  * The conversation as an API takes it: a reply that failed or was stopped is left out, with what answered it, a call
- * nothing answered is answered as not run, and an answer that says nothing says so.
+ * nothing answered is answered as not run, and an answer that says nothing says so. An image a request was refused
+ * with, one sent since the last reply, is told by the refusal, so no session holds one every request after refuses.
  */
 function sendable(messages: Message[]): Message[] {
   const sent: Message[] = [];
   const unanswered = new Map<string, Call>();
+  let since = 0; // where what was sent since the last reply begins
   const close = () => {
     for (const call of unanswered.values()) sent.push(result(call, [{ type: "text", text: UNRUN }], true));
     unanswered.clear();
@@ -176,7 +189,10 @@ function sendable(messages: Message[]): Message[] {
     }
     close();
     if (message.role === "assistant") {
-      if (message.stopReason === "error" || message.stopReason === "aborted") continue;
+      if (message.stopReason === "refused")
+        for (let n = since; n < sent.length; n++) sent[n] = refused(sent[n], message.errorMessage!);
+      if (["error", "aborted", "refused"].includes(message.stopReason)) continue;
+      since = sent.length + 1;
       for (const block of message.content) if (block.type === "toolCall") unanswered.set(block.id, block);
     }
     sent.push(message);
@@ -184,6 +200,17 @@ function sendable(messages: Message[]): Message[] {
   close();
   return sent;
 }
+
+/** A message as a request was refused with it: each image in it told by the refusal. */
+const refused = (message: Message, why: string): Message =>
+  shows(message)
+    ? {
+        ...message,
+        content: message.content.map((block) =>
+          block.type === "image" ? { type: "text", text: `Not shown: ${why}` } : block,
+        ),
+      }
+    : message;
 
 /** The data of each event a server streams, as JSON. */
 async function* events(body: ReadableStream<Uint8Array>) {
@@ -579,7 +606,6 @@ const SESSIONS = join(HOME, "sessions");
 const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
 
 const SHOWN = 12_000; // characters of output the model sees per call
-const SEEN = 3_932_160; // bytes of an image a model is shown: 5 MiB in base64, the most Anthropic takes
 
 const BASH = {
   name: "bash",
@@ -686,19 +712,23 @@ const hear = (sid: string, said: User[]) => {
 /**
  * Read what the user said, ask, run what it asks for, and again until it has nothing to run and nothing more was
  * said. A prompt sent during a turn joins it, and the model reads it once the commands it is running end. A reply is
- * written once its commands end, with what they returned.
+ * written once its commands end, with what they returned. A request refused with an image the commands returned is
+ * asked again, with the refusal in its place.
  */
 async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<string> {
+  let results: Result[] = [];
   try {
     for (;;) {
       hear(sid, said);
       if (signal.aborted) return "cancelled";
       const reply = await ask(sid, signal);
+      const again = reply.stopReason === "refused" && results.some(shows);
       const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
-      const results = [];
+      results = [];
       for (const call of calls) if (!signal.aborted) results.push(await run(sid, call, signal));
       append(sid, ...[reply, ...results].map((message) => ({ message })));
-      if (reply.stopReason === "error") throw new Error(reply.errorMessage);
+      if (again) continue;
+      if (reply.stopReason === "error" || reply.stopReason === "refused") throw new Error(reply.errorMessage);
       if (!calls.length && !said.length && !signal.aborted)
         return reply.stopReason === "length" ? "max_tokens" : "end_turn";
     }
@@ -746,24 +776,19 @@ async function bash(sid: string, command: string, signal: AbortSignal) {
     // Every command starts in the session's directory. One that ends elsewhere is told so, as Claude Code tells it.
     const ended = read(left).trim();
     const reset = ended && ended !== cwd ? `Shell cwd was reset to ${cwd}` : "";
-    // An image larger fails, so the session never holds one a request would be refused for.
-    const big = !!mimeType && written.length > SEEN;
-    const bytes = written.length.toLocaleString("en");
-    const output = big
-      ? `The image is ${bytes} bytes; a model is shown at most ${SEEN.toLocaleString("en")}.`
-      : written.toString("utf8").trimEnd();
-    const text = [output, reset].filter(Boolean).join("\n") || SILENT;
+    // What a command writes is an image, whole, or text. Anything else is neither, and fails.
+    const neither = !mimeType && !isUtf8(written);
+    const output = mimeType ? "" : neither ? NEITHER : written.toString("utf8").trimEnd();
+    const text = [output, reset].filter(Boolean).join("\n");
     const cut = text.length - SHOWN;
-    const content: Result["content"] =
-      mimeType && !big
-        ? [{ type: "image", data: written.toString("base64"), mimeType }]
-        : [
-            {
-              type: "text",
-              text: cut <= 0 ? text : `${text.slice(0, SHOWN / 2)}\n[${cut} characters cut]\n${text.slice(-SHOWN / 2)}`,
-            },
-          ];
-    return { content, failed: status !== 0 || big };
+    const told = cut <= 0 ? text : `${text.slice(0, SHOWN / 2)}\n[${cut} characters cut]\n${text.slice(-SHOWN / 2)}`;
+    const content: Result["content"] = mimeType
+      ? [
+          { type: "image", data: written.toString("base64"), mimeType },
+          ...(told ? [{ type: "text" as const, text: told }] : []),
+        ]
+      : [{ type: "text", text: told || SILENT }];
+    return { content, failed: status !== 0 || neither };
   } finally {
     signal.removeEventListener("abort", interrupt);
     closeSync(out);

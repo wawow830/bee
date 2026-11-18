@@ -76,18 +76,19 @@ harness reads the file before every step and keeps no other state. For each sett
 `{cache}`, the latest line holds.
 
 **One tool.** `bash`: "Every command starts in the working directory. Returns the output, cut at 12,000 characters, or
-the image written." One that ends elsewhere is told "Shell cwd was reset to <it>", as Claude Code tells it, and with the
-working directory gone, every one is told it does not exist. The computer is what lasts: files, and whatever a command
-left running.
+the image written." Output that is neither fails. One that ends elsewhere is told "Shell cwd was reset to <it>", as
+Claude Code tells it, and with the working directory gone, every one is told it does not exist. The computer is what
+lasts: files, and whatever a command left running.
 
 **An image is a file.** One pasted, in the editor or with Ctrl-V, is written to a file, and its path is what you said.
-The model sees an image by writing it, as with `cat`. One larger than a model is shown fails, so a session never holds
-one a provider would refuse.
+The model sees an image by writing it, as with `cat`. The provider is the judge of an image: a request it refuses with
+one, it is asked again with the refusal in the image's place, so a session never holds one every request after is
+refused for.
 
 **bee speaks to the models itself.** A request is the file's messages, as the API takes them: a reply that failed or was
-stopped is left out, a call nothing answered is answered "(not run)", an answer that says nothing says "(no output)",
-and what only one model can read, its thinking and the ids it gave, is sent back only to it. The prompt and the
-conversation are each cached to their end.
+stopped is left out, a call nothing answered is answered "(not run)", an answer that says nothing says "(no output)", an
+image a request was refused with is "Not shown:" and the refusal, and what only one model can read, its thinking and the
+ids it gave, is sent back only to it. The prompt and the conversation are each cached to their end.
 
 **The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model what
 to do. Instructions are yours, in `AGENTS.md`, from `~/.bee/agent` and every directory from the root down to the working
