@@ -625,8 +625,11 @@ const beginning = (cwd: string): Line => ({
 /** The lines of each session nothing has been said in yet, held until the first thing said writes them. */
 const unborn = new Map<string, Line[]>();
 
-/** The lines a session's file holds. One that is not JSON is empty. */
-const written = (sid: string): Line[] => read(file(sid)).trimEnd().split("\n").map(parse);
+/** A session's file as it was written: nothing, for one nothing has been said in. */
+const written = (sid: string) => (existsSync(file(sid)) ? readFileSync(file(sid)) : Buffer.alloc(0));
+
+/** The line of what was written that begins at `at`. */
+const lineAt = (all: Buffer, at: number): Line => parse(all.toString("utf8", at, all.indexOf("\n", at)));
 
 /**
  * The lines of each session worked in, as last read, and how many bytes they were. A session is only appended to, so
@@ -634,13 +637,13 @@ const written = (sid: string): Line[] => read(file(sid)).trimEnd().split("\n").m
  */
 const kept = new Map<string, { size: number; lines: Line[] }>();
 
-/** A session's lines. */
+/** A session's lines. One that is not JSON is empty. */
 function lines(sid: string): Line[] {
   const held = unborn.get(sid);
   if (held) return held;
   if (!/^[\w-]+$/.test(sid) || !existsSync(file(sid))) throw failure(-32002, `No session ${sid}`);
   const { size } = statSync(file(sid));
-  if (kept.get(sid)?.size !== size) kept.set(sid, { size, lines: written(sid) });
+  if (kept.get(sid)?.size !== size) kept.set(sid, { size, lines: read(file(sid)).trimEnd().split("\n").map(parse) });
   return kept.get(sid)!.lines;
 }
 
@@ -864,11 +867,15 @@ function quote(sid: string, told: User, at: number) {
 /** What a text is called: the start of its first line. */
 const headline = (text: string) => text.trim().split("\n")[0].slice(0, 80);
 
-/** What a session is called: the headline of the first thing the user said in it since it began, or was forked. */
-const title = (all: Line[]) => {
-  const first = all.slice(all.findLastIndex((line) => line.forked) + 1).find((line) => line.user)?.user;
-  return headline(plain(first?.content ?? [])) || undefined;
-};
+/**
+ * What a session is called: the headline of the first thing the user said in it since it began, or was forked. Each
+ * line is one thing, by the key it begins with, so the lines that say are found by how they begin, and only the one
+ * said is read.
+ */
+function title(all: Buffer) {
+  const said = all.indexOf('\n{"user":', all.lastIndexOf('\n{"forked":') + 1);
+  return said < 0 ? undefined : headline(plain(lineAt(all, said + 1).user!.content)) || undefined;
+}
 
 /**
  * Tell the editor what the file says of the session: what it is called, and how full the context of the model chosen
@@ -876,7 +883,7 @@ const title = (all: Line[]) => {
  */
 function describe(sid: string) {
   const all = lines(sid);
-  const called = title(all);
+  const called = title(written(sid));
   const used = all.map((line) => (line.reply ? counted(line.reply.usage) : 0)).findLast(Boolean);
   const size = settings(sid).model.contextWindow;
   if (called) update(sid, { sessionUpdate: "session_info_update", title: called });
@@ -958,7 +965,7 @@ function list(cwd?: string) {
     .map((sessionId) => {
       const all = written(sessionId);
       const updatedAt = statSync(file(sessionId)).mtime.toISOString();
-      return { sessionId, cwd: all[0].began!.cwd, title: title(all), updatedAt };
+      return { sessionId, cwd: lineAt(all, 0).began!.cwd, title: title(all), updatedAt };
     })
     .filter((session) => !cwd || session.cwd === cwd)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
