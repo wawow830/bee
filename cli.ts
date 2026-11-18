@@ -318,7 +318,7 @@ const ran = new Map<string, Call>(); // what bee ran, by the id of its call
 const quoted = new Map<string, string>(); // what you said in the session, by the id bee gave it
 const unheard: string[] = []; // sent, and waiting for bee to hear it
 const queued: string[] = []; // waiting for the turn to end
-const history: string[] = []; // what you have said, here and in the sessions opened, for Up to recall
+const history: string[] = []; // what you have said in the session, for Up to recall
 
 const busy = () => prompts > 0;
 
@@ -620,11 +620,8 @@ const stop = () => send({ method: "session/cancel", params: { sessionId } });
 
 /** Open the session named, showing only what was said in it, or else a new one. */
 async function open(id?: string) {
-  usage = "";
-  title = "";
-  top = undefined;
-  transcript.length = 0;
-  latest = undefined;
+  [usage, title, top, latest, back] = ["", "", undefined, undefined, 0];
+  for (const each of [transcript, history]) each.length = 0;
   for (const each of [ran, quoted]) each.clear();
   const opened = await call(id ? "session/load" : "session/new", { sessionId: id, cwd, mcpServers: [] });
   sessionId = id ?? opened.sessionId;
@@ -633,15 +630,15 @@ async function open(id?: string) {
 }
 
 /**
- * Go back to before what you said last: open a fork from there, with it back in the prompt. The session left stays as
- * it was. Each waits for the one before, so pressed again, it goes further back.
+ * Go back to before what you said last: open a fork from there, with what you said back in the prompt, before what is
+ * there. The session left stays as it was. Each waits for the one before, so pressed again, it goes further back.
  */
 function rewind() {
   const step = async () => {
     if (!latest) return;
     const { cursorId, text } = latest;
     await open((await call("session/fork", { sessionId, cursorId, cwd, mcpServers: [] })).sessionId);
-    splice(0, typed.length, text);
+    splice(0, typed.length, [text, typed].filter(Boolean).join("\n\n"));
     draw();
   };
   last = last.then(step).catch((error) => note(error.message, red));

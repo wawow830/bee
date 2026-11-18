@@ -62,9 +62,10 @@ is `new` or the title of another session here. A value named whole, or without i
 its case. What fits is shown under the prompt as you type. Tab goes through it, and Enter sends the command once only
 one fits. Anything else that starts with `/`, such as a path, is a prompt.
 
-Going back is a fork of the session from before what you said last, with it back in the prompt to say again, and Esc
-again goes further back. The session left stays as it was, so each branch is a session, called by what was first said in
-it, and the screen shows the one you are in.
+Going back is a fork of the session from before what you said last, with it back in the prompt, before what is there, to
+say again; Esc again goes further back. Up recalls what is said, and what is unsaid is in the prompt, so nothing is out
+of sight. The session left stays as it was, so each branch is a session, called by what was first said in it, and the
+screen shows the one you are in.
 
 ## How it works
 
