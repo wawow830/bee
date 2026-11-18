@@ -3,13 +3,9 @@
 A minimal agent harness. It speaks [ACP](https://agentclientprotocol.com) on stdio, so your editor is the UI. It gives
 the model one tool, bash. A session is one append-only file.
 
-Two files: `bee.ts` is the harness, `cli.ts` is a terminal for it.
+Two files: `bee.ts` is the harness, `cli.ts` is a terminal for it. They need nothing but Bun.
 
 ## Run
-
-```sh
-bun install
-```
 
 Point an ACP client at `bee.ts`. In T3 Code: **Settings → Providers → Add provider → Show more → Local ACP command**,
 with the path to `bee.ts` as the executable.
@@ -20,11 +16,13 @@ Providers go in `~/.bee/agent/models.json`, in the format pi uses:
 { "providers": { "anthropic": { "apiKey": "...", "baseUrl": "https://..." } } }
 ```
 
-`baseUrl` is optional. A key in the environment that [pi-ai](https://www.npmjs.com/package/@earendil-works/pi-ai)
-knows, such as `ANTHROPIC_API_KEY`, works too.
+`baseUrl` is optional. An Anthropic key that is an OAuth token, one with `sk-ant-oat` in it, is sent as Claude Code,
+as the API takes one only from it: its prompt begins with Claude Code's first line.
 
-The models are pi's: those pi.dev lists for each provider, over those pi-ai shipped with. bee starts with the lists it
-fetched last, in `~/.bee/agent/catalog`, and fetches them again without waiting, so a new model is there the next time.
+The models are those [pi.dev](https://pi.dev) lists for each provider, in the APIs bee speaks: Anthropic's Messages,
+and OpenAI's Responses as Codex takes them. bee starts with the lists it fetched last, in `~/.bee/agent/catalog`, and
+fetches them again without waiting, so a new model is there the next time. A provider it has no list of yet, it waits
+for.
 
 | Variable   | Meaning                                               |
 | ---------- | ----------------------------------------------------- |
@@ -84,6 +82,10 @@ is what lasts: files, and whatever a command left running.
 **An image is a file.** One pasted, in the editor or with Ctrl-V, is written to a file, and its path is what you said.
 The model sees an image by writing it, as with `cat`. One larger than a model is shown fails, so a session never holds
 one a provider would refuse.
+
+**bee speaks to the models itself.** A request is the file's messages, as the API takes them: a reply that failed or
+was stopped is left out, a call nothing answered is answered "Not run.", and what only one model can read, its thinking
+and the ids it gave, is sent back only to it. The prompt and the conversation are each cached to their end.
 
 **The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model what
 to do. Instructions are yours, in `AGENTS.md`, from `~/.bee/agent` and every directory from the root down to the working
