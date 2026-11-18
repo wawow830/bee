@@ -57,11 +57,42 @@ const scrolled = 3; // how many rows a turn of the wheel scrolls
 /** How wide a row can be after `indent` columns. The last column stays free. */
 const room = (indent = pad.length) => out.columns - 1 - indent;
 
-/** Text as rows: each of its lines, cut wherever `row` matches. */
-const cut = (text: string, row: string) => text.split("\n").flatMap((line) => line.match(new RegExp(row, "g")) ?? [""]);
+/** How many columns text takes on screen. Its looks take none, and a wide character, such as an emoji, takes two. */
+const width = (text: string) => Bun.stringWidth(text);
 
-/** Rows no wider than `size`, broken after a space where there is one. Each keeps the spaces it was broken at. */
-const fill = (text: string, size: number) => cut(text, `.{1,${size}}(?=\\s|$)\\s*|.{1,${size}}`);
+/** What shows as one character, such as an emoji made of several. */
+const graphemes = new Intl.Segmenter();
+
+/** Text as rows no wider than `size`: each of its lines, cut before each character that would not fit. */
+const chop = (text: string, size: number) =>
+  text.split("\n").flatMap((line) => {
+    const rows = [""];
+    for (const { segment } of graphemes.segment(line)) {
+      if (rows.at(-1) && width(rows.at(-1) + segment) > size) rows.push("");
+      rows[rows.length - 1] += segment;
+    }
+    return rows;
+  });
+
+/**
+ * Rows no wider than `size`, broken after a space where there is one. A word, with the spaces its line begins with if
+ * it is the first, goes on the row before it if it fits there, and else begins a row, chopped if it is wider than one.
+ * Each row keeps the spaces it was broken at.
+ */
+const fill = (text: string, size: number) =>
+  text.split("\n").flatMap((line) => {
+    const rows: string[] = [];
+    for (const token of line.match(/\s*\S+\s*|\s+/g) ?? [""]) {
+      const word = token.trimEnd();
+      if (rows.length && width(rows.at(-1) + word) <= size) {
+        rows[rows.length - 1] += token;
+        continue;
+      }
+      const pieces = chop(word, size);
+      rows.push(...pieces.slice(0, -1), pieces.at(-1) + token.slice(word.length));
+    }
+    return rows;
+  });
 
 /** Rows no wider than `size`, broken at a space where there is one. */
 const wrap = (text: string, size = room()) => fill(text, size).map((row) => row.trimEnd());
@@ -85,9 +116,6 @@ const looks =
 
 /** Text with its marks taken out, and the look of each character. */
 type Marked = { text: string; each: number[] };
-
-/** How many columns `row` takes on screen. */
-const width = (row: string) => row.replace(/\x1b\[[\d;]*m/g, "").length;
 
 /** The marks of markdown in `text`, and each character between them. */
 const tokens = (text: string) => text.match(/\*\*|`|[^]/g) ?? [];
@@ -147,7 +175,7 @@ function prose(line: string, done: boolean, look: number) {
   const [, indent = "", item = "", body = line] = heading ? [] : (line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)/) ?? []);
   const lead = item && indent + (/\d/.test(item) ? item : "•") + " ";
   const text = marked(heading?.[1] ?? body, done, heading ? look | strong : look);
-  return hang(looks(look)(dark(lead)), paint(text, room(pad.length + lead.length)));
+  return hang(looks(look)(dark(lead)), paint(text, room(pad.length + width(lead))));
 }
 
 /** A line of code, as it is. Its rows hang under where its text begins. */
@@ -186,7 +214,7 @@ function table(lines: string[], whole: boolean, look: number) {
   const text = content.map((row, r) =>
     columns.map((n) => marked(row[n] ?? "", whole, headed && !r ? look | strong : look)),
   );
-  const widths = columns.map((n) => Math.max(1, ...text.map((row) => row[n].text.length)));
+  const widths = columns.map((n) => Math.max(1, ...text.map((row) => width(row[n].text))));
   const sum = () => widths.reduce((sum, each) => sum + each, 0);
   while (sum() > room() - gap.length * (columns.length - 1) && Math.max(...widths) > 1) {
     widths[widths.indexOf(Math.max(...widths))]--; // the widest gives way first
@@ -432,9 +460,8 @@ function layout() {
 /** Draw the screen: as much of the transcript as fits, and under it what is queued and the prompt. */
 function draw() {
   const size = room();
-  const chop = (text: string) => cut(text, `.{1,${size}}`);
-  const input = chop(typed);
-  const before = chop(typed.slice(0, cursor)); // the cursor is at the end of these rows
+  const input = chop(typed, size);
+  const before = chop(typed.slice(0, cursor), size); // the cursor is at the end of these rows
   const command = read(tabbed || typed);
   const fits = command?.fits ?? [];
   const last = Math.max(choices, fits.indexOf(typed) + 1); // the hints shown end at the one Tab is on
@@ -453,12 +480,12 @@ function draw() {
     ...listed.map((hint) => {
       // A value is shown as it is, and a command with what it is set to.
       const line = command!.of ? hint : hint.trimEnd().padEnd(widest) + pad + set(hint);
-      const text = line.slice(from, room()).trimEnd();
+      const text = chop(line.slice(from), room(pad.length + from))[0].trimEnd();
       return pad + " ".repeat(from) + (hint === typed ? text : dark(text)); // the one Tab is on is in the prompt
     }),
     ...(more ? [pad + " ".repeat(from) + dark(`${more} more`)] : []),
   ];
-  const waiting = [...unheard, ...queued].map((text) => amber(mark) + dark(text.split("\n")[0].slice(0, room())));
+  const waiting = [...unheard, ...queued].map((text) => amber(mark) + dark(chop(text, room())[0]));
   const prompt: string[] = []; // all under the transcript, each part set apart from the one before by a blank row
   for (const own of [waiting, typing]) {
     if (own.length && (rows.length || prompt.length)) prompt.push("");
@@ -472,7 +499,7 @@ function draw() {
   shown = visible.length;
   const screen = [...visible, ...prompt].slice(-out.rows);
   // One frame: each row drawn over the one before, and the cursor put where it is in the prompt.
-  const column = pad.length + before.at(-1)!.length + 1;
+  const column = pad.length + width(before.at(-1)!) + 1;
   const drawn = screen.map((row) => row + "\x1b[K").join("\r\n");
   out.write(`\x1b[?2026h\x1b[H${drawn}\x1b[J\x1b[${screen.length - below};${column}H\x1b[?2026l`);
 }
@@ -760,8 +787,6 @@ function splice(from: number, to: number, text = "") {
 
 /** Put the cursor at `to`, or as near as the prompt allows. */
 const move = (to: number) => (cursor = Math.max(0, Math.min(typed.length, to)));
-
-const graphemes = new Intl.Segmenter();
 
 /** Where the cursor would be `step` characters on: a character is what shows as one, such as an emoji. */
 function beside(step: number) {
