@@ -644,8 +644,8 @@ function lines(sid: string): Line[] {
 }
 
 /**
- * Add a line to a session. The first message makes the file, with the lines held before it, so no file is a session
- * nothing was said in. Nothing else makes it, so a session deleted stays deleted: a line written to a new file would
+ * Add a line to a session. The first message makes the file, with the lines held before it, and names the session, so
+ * no file is a session nothing was said in. Nothing else makes it, so a session deleted stays deleted: a line written to a new file would
  * be a session with no beginning, which no model will take and no one can list.
  */
 function append(sid: string, ...added: Line[]) {
@@ -663,6 +663,7 @@ function append(sid: string, ...added: Line[]) {
   } finally {
     closeSync(fd);
   }
+  if (held) info(sid);
 }
 
 const cwdOf = (sid: string) => lines(sid)[0].cwd!;
@@ -701,7 +702,6 @@ const turns = new Map<string, Turn>();
 /** Write what the user said that the turn has not read, in the order it was said. */
 const hear = (sid: string, said: User[]) => {
   for (const message of said.splice(0)) append(sid, { message });
-  named(sid);
 };
 
 /**
@@ -835,8 +835,8 @@ const title = (sid: string) => {
   return plain(first).trim().split("\n")[0].slice(0, 80) || undefined;
 };
 
-/** What the session is called, once the user has said something in it. */
-const named = (sid: string) => {
+/** Tell the editor what the session is called, once the user has said something in it. */
+const info = (sid: string) => {
   const called = title(sid);
   if (called) update(sid, { sessionUpdate: "session_info_update", title: called });
 };
@@ -936,7 +936,7 @@ const parts = (blocks: any[]): User["content"] =>
 /** A session the editor opens, what it is called, and how full its context was at the last reply counted. */
 function open(sessionId: string) {
   const last = conversation(sessionId).findLast(counted);
-  named(sessionId);
+  info(sessionId);
   if (last) usage(sessionId, last);
   return { sessionId, configOptions: options(sessionId) };
 }

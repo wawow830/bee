@@ -304,7 +304,7 @@ let cursor = 0; // where the cursor is in it
 let tabbed = ""; // what you typed, while Tab goes through what fits it
 let writing: { said: "thought" | "reply"; text: string; whole: boolean } | undefined; // what bee is thinking or saying
 let usage = ""; // how full its context is
-let name = ""; // what the session is called
+let title = ""; // what the session is called
 let options: Option[] = []; // the session's settings
 let prompts = 0; // how many bee has not answered: a turn is under way while there are any
 let top: Place | undefined; // where the screen begins, once you have scrolled; else it follows the transcript
@@ -428,7 +428,7 @@ function layout() {
 
 /** What a command is set to, shown beside it as a hint. */
 function current(id: string) {
-  if (id === "session") return [usage, name && `"${name}"`, sessionId].filter(Boolean).join(" ");
+  if (id === "session") return [usage, title && `"${title}"`, sessionId].filter(Boolean).join(" ");
   return options.find((option) => option.id === id)?.currentValue ?? "";
 }
 
@@ -562,8 +562,8 @@ const updates: Record<string, (update: Update) => void> = {
     usage = `${Math.ceil((100 * used) / size)}%`;
     draw();
   },
-  session_info_update: ({ title }) => {
-    name = title;
+  session_info_update: (update) => {
+    title = update.title;
     draw();
   },
 };
@@ -614,7 +614,7 @@ const stop = () => send({ method: "session/cancel", params: { sessionId } });
 /** Open the session named, showing what was said in it, or else a new one. */
 async function open(id?: string) {
   usage = "";
-  name = "";
+  title = "";
   const opened = await call(id ? "session/load" : "session/new", { sessionId: id, cwd, mcpServers: [] });
   sessionId = id ?? opened.sessionId;
   options = opened.configOptions;
