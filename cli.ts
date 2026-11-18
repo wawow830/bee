@@ -441,7 +441,8 @@ function draw() {
   const listed = fits.slice(last - choices, last);
   const from = command?.of ? command.of.length + 2 : 0; // values are shown from where they differ
   const more = fits.length - listed.length;
-  const set = (hint: string) => commands().find((one) => `/${one.id} ` === hint)!.set; // what a command hinted is set to
+  // What a command hinted is set to.
+  const set = (hint: string) => commands().find((one) => `/${one.id} ` === hint)!.set;
   const widest = Math.max(...listed.map((hint) => hint.trimEnd().length));
   const below = input.length - before.length + listed.length + (more ? 1 : 0);
   const turning = spinner[Math.floor(Date.now() / frame) % spinner.length];
@@ -509,7 +510,7 @@ function shell({ code, status, output }: Call) {
   return [...lines(code.trim(), status === "failed" ? red : gray), ...printed].map((row) => row && pad + row);
 }
 
-/** What you said, to recall. */
+/** What you said: shown, and kept for Up to recall. */
 function user(text: string) {
   history.push(text);
   end();
@@ -676,9 +677,9 @@ function named(values: [string, () => Promise<unknown>][]) {
 }
 
 /**
- * Each command. A session is named by its title, so of those alike the latest; `new` is always a new one, and `fork` one
- * that begins as this one is. What you said is named by its first line, so of those alike the latest; rewinding to it is
- * a fork from before it, with it back in the prompt.
+ * Each command. A session is named by its title, so of those alike the latest; `new` is always a new one, and `fork`
+ * one that begins as this one is. What you said is named by its first line, so of those alike the latest; rewinding to
+ * it is a fork from before it, with it back in the prompt.
  */
 function commands(): Command[] {
   const settings = options.map((option) => ({

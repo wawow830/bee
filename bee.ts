@@ -679,9 +679,9 @@ function settings(sid: string) {
 }
 
 /**
- * Fork a session: a new one, with its lines up to the cursor, or all of them. A cursor is where something the user said
- * is, the number of lines before it; lines are only appended, so a cursor never moves. The fork is unborn until
- * something is said in it, as a new session is, so a fork nothing is said in leaves no file.
+ * Fork a session: a new one, with all its lines or those before a cursor. A cursor is the place of something the user
+ * said: how many lines come before it. Lines are only appended, so a cursor never moves. Like a new session, a fork has
+ * no file until something is said in it, so one nothing is said in leaves none.
  */
 function fork(sid: string, cursorId?: string) {
   const all = lines(sid);
@@ -706,12 +706,12 @@ async function ask(sid: string, signal: AbortSignal) {
 type Turn = { abort: AbortController; said: User[]; done?: Promise<string> };
 const turns = new Map<string, Turn>();
 
-/** Write what the user said that the turn has not read, in the order it was said. */
+/** Write what the user said that the turn has not read, in order. An editor that reads cursors is told. */
 const hear = (sid: string, said: User[]) => {
   for (const message of said.splice(0)) {
     const at = lines(sid).length;
     append(sid, { message });
-    if (editor.session?.cursors) quote(sid, message, at);
+    if (cursors) quote(sid, message, at);
   }
 };
 
@@ -765,8 +765,8 @@ function head(text: string, path: string) {
 }
 
 /**
- * Run the command a call asks for. Returns what it wrote, as text or an image, and whether it failed. Text cut keeps its
- * file. A call that cannot run throws why.
+ * Run the command a call asks for. Returns what it wrote, as text or an image, and whether it failed. Text cut keeps
+ * its file. A call that cannot run throws why.
  */
 async function bash(sid: string, call: Call, signal: AbortSignal) {
   const { command } = call.arguments;
@@ -827,17 +827,17 @@ const update = (sessionId: string, fields: object) =>
 const say = (sid: string, who: "user_message" | "agent_message" | "agent_thought", words: string, messageId?: string) =>
   words && update(sid, { sessionUpdate: `${who}_chunk`, messageId, content: { type: "text", text: words } });
 
-/** What the editor can read, as it said when it began. */
-let editor: { session?: { cursors?: object } } = {};
+/** Whether the editor reads cursors, as it said when it began. */
+let cursors = false;
 
 /**
- * Tell the editor something the user said, at line `at`, and, if it reads cursors, that a fork can begin before it. An
- * editor that reads cursors is told what the user said as bee hears it, so each has one before something it holds.
+ * Tell the editor something the user said, at line `at`, and, if it reads cursors, the cursor before it: a fork can
+ * begin there. Such an editor is told what the user said as bee hears it, so it holds what each cursor is before.
  */
 function quote(sid: string, message: User, at: number) {
   const messageId = randomUUID();
   say(sid, "user_message", plain(message.content), messageId);
-  if (!editor.session?.cursors) return;
+  if (!cursors) return;
   const anchor = { type: "user_message", messageId, position: "before" };
   update(sid, { sessionUpdate: "cursor_update", cursorId: String(at), capabilities: { fork: {} }, anchor });
 }
@@ -970,7 +970,7 @@ function open(sessionId: string) {
 
 const handlers: Record<string, (params: any) => unknown> = {
   initialize: ({ clientCapabilities }) => {
-    editor = clientCapabilities ?? {};
+    cursors = !!clientCapabilities?.session?.cursors;
     return {
       protocolVersion: 1,
       agentInfo: { name: "bee", title: "bee", version },
