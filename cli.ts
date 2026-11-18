@@ -367,7 +367,7 @@ function add(said: Said, make: () => string[], version = () => "") {
 }
 
 /** How many characters a row shows, but for spaces and looks: as many, however wide the screen. */
-const characters = (row: string) => row.replace(/\x1b\[[\d;]*m|\s/g, "").length;
+const characters = (row: string) => [...graphemes.segment(row.replace(/\x1b\[[\d;]*m|\s/g, ""))].length;
 
 /** Where row `n` of `rows` is. After the last row with characters, there is no place: the transcript is followed. */
 function place(rows: Row[], n: number): Place | undefined {
@@ -775,7 +775,7 @@ function read(text: string): { fits: string[]; of?: string; pick?: () => Promise
 let back = 0; // how many prompts Up has gone back
 const drafts = new Map<number, string>(); // what the prompt was at each place Up and Down left, by how far back it is
 let pasting = false; // between the marks a terminal puts around a paste
-let escaped = 0; // when Esc was last pressed with nothing typed and no turn to stop
+let escaped = 0; // when Esc was last pressed with nothing typed and no turn to stop, if nothing was pressed since
 
 /** Put `text` where the prompt runs `from` to `to`, and the cursor after it. */
 function splice(from: number, to: number, text = "") {
@@ -885,6 +885,7 @@ const buttons: Record<number, (row: number) => unknown> = {
 function press(data: string) {
   for (const [key] of data.matchAll(/\x1b\[<[\d;]*[Mm]|\x1b\[[\d;]*[^\d;]|\x1b[^\x1b]|[^]/g)) {
     if (key !== "\t") tabbed = "";
+    if (key !== "\x1b") escaped = 0;
     const mouse = key.match(/^\x1b\[<(\d+);\d+;(\d+)([Mm])$/);
     if (mouse) mouse[3] === "M" && buttons[+mouse[1]]?.(+mouse[2]);
     else if (/^\x1b\[20[01]~$/.test(key)) pasting = key === "\x1b[200~";
