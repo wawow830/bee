@@ -589,14 +589,14 @@ const SESSIONS = join(HOME, "sessions");
 const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
 
 const SHOWN = 20_000; // characters of output the model sees per call
-const TIMEOUT = 2; // minutes a command runs before it is stopped
+const TIMEOUT = 120; // seconds a command runs before it is stopped
 
 const BASH = {
   name: "bash",
   description:
     "Every command starts in the working directory. " +
     `Returns the output, cut at ${SHOWN.toLocaleString("en")} characters, or the image written. ` +
-    `Timeout at ${TIMEOUT} minutes.`,
+    `Timeout at ${TIMEOUT} seconds.`,
   parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
 };
 
@@ -784,7 +784,7 @@ async function bash(sid: string, call: Call, signal: AbortSignal) {
   // In its own process group, so an interrupt stops all of it.
   const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", out, out], detached: true });
   // Stopped as the user stops it, at the timeout too.
-  const timeout = AbortSignal.timeout(TIMEOUT * 60_000);
+  const timeout = AbortSignal.timeout(TIMEOUT * 1000);
   const stop = AbortSignal.any([signal, timeout]);
   const interrupt = () => process.kill(-child.pid!, "SIGINT");
   stop.addEventListener("abort", interrupt);
