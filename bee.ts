@@ -83,10 +83,6 @@ const SILENT = bee("no output");
 const UNRUN = bee("not run");
 const UNSUPPORTED = bee("output is of unsupported format");
 
-/** Whether a tool's answer shows the model an image. */
-const shows = (message: Message): message is Result =>
-  message.role === "toolResult" && message.content.some((block) => block.type === "image");
-
 const user = (content: User["content"]): User => ({ role: "user", content, timestamp: Date.now() });
 const result = (call: Call, content: Result["content"], isError: boolean): Result => ({
   role: "toolResult",
@@ -172,8 +168,8 @@ const REFUSALS = [400, 413];
 
 /**
  * The conversation as an API takes it: a reply that failed or was stopped is left out, with what answered it, a call
- * nothing answered is answered as not run, and an answer that says nothing says so. An image a request was refused
- * with, one sent since the last reply, is told by the refusal, so no session holds one every request after refuses.
+ * nothing answered is answered as not run, and an answer that says nothing says so. An answer a request was refused
+ * with, one sent since the last reply, is the refusal, so no session holds one every request after is refused for.
  */
 function sendable(messages: Message[]): Message[] {
   const sent: Message[] = [];
@@ -204,15 +200,10 @@ function sendable(messages: Message[]): Message[] {
   return sent;
 }
 
-/** A message as a request was refused with it: each image in it told by the refusal. */
+/** A message as a request was refused with it: a tool's answer is the refusal. */
 const refused = (message: Message, why: string): Message =>
-  shows(message)
-    ? {
-        ...message,
-        content: message.content.map((block) =>
-          block.type === "image" ? { type: "text", text: bee(`not shown: ${why}`) } : block,
-        ),
-      }
+  message.role === "toolResult"
+    ? { ...message, content: [{ type: "text", text: bee(`provider refused: ${why}`) }] }
     : message;
 
 /** The data of each event a server streams, as JSON. */
@@ -715,8 +706,8 @@ const hear = (sid: string, said: User[]) => {
 /**
  * Read what the user said, ask, run what it asks for, and again until it has nothing to run and nothing more was
  * said. A prompt sent during a turn joins it, and the model reads it once the commands it is running end. A reply is
- * written once its commands end, with what they returned. A request refused with an image the commands returned is
- * asked again, with the refusal in its place.
+ * written once its commands end, with what they returned. A request refused with what the commands returned is asked
+ * again, with the refusal in its place.
  */
 async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<string> {
   let results: Result[] = [];
@@ -725,7 +716,7 @@ async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<str
       hear(sid, said);
       if (signal.aborted) return "cancelled";
       const reply = await ask(sid, signal);
-      const again = reply.stopReason === "refused" && results.some(shows);
+      const again = reply.stopReason === "refused" && results.length > 0;
       const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
       results = [];
       for (const call of calls) if (!signal.aborted) results.push(await run(sid, call, signal));
@@ -758,7 +749,7 @@ function head(text: string, path: string) {
   const end = text.lastIndexOf("\n", SHOWN);
   const shown = text.slice(0, end > 0 ? end : SHOWN).replace(/[\ud800-\udbff]$/, ""); // not half a character
   const unshown = (text.length - shown.length).toLocaleString("en");
-  return `${shown}\n${bee(`output cut, ${unshown} characters not shown, full output in ${path}`)}`;
+  return `${shown}\n${bee(`${unshown} characters not shown, full output in ${path}`)}`;
 }
 
 /** Run a command. Returns what it wrote, as text or an image, and whether it failed. Text cut keeps its file. */

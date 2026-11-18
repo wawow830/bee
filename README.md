@@ -78,21 +78,22 @@ harness reads the file before every step and keeps no other state. For each sett
 **One tool.** `bash`: "Every command starts in the working directory. Returns the output, cut at 8,000 characters, or
 the image written." What a command wrote is passed through: text, cut to its first lines within 8,000 characters, or an
 image. All bee says is apart from it, as "(bee: …)":
-"(bee: output cut, <n> characters not shown, full output in <file>)", "(bee: no output)" and
+"(bee: <n> characters not shown, full output in <file>)", "(bee: no output)" and
 "(bee: output is of unsupported format)"; and where a call cannot run, "(bee: tool does not exist)",
 "(bee: command is not a string)" or "(bee: working directory does not exist)". The computer is what lasts: files, and
 whatever a command left running.
 
 **An image is a file.** One pasted, in the editor or with Ctrl-V, is written to a file, and its path is what you said.
-The model sees an image by writing it, as with `cat`. The provider is the judge of an image: a request it refuses with
-one, it is asked again with the refusal in the image's place, so a session never holds one every request after is
-refused for.
+The model sees an image by writing it, as with `cat`.
 
 **bee speaks to the models itself.** A request is the file's messages, as the API takes them: a reply that failed or was
 stopped is left out, a call nothing answered is answered "(bee: not run)", an answer that says nothing says
-"(bee: no output)", an image a request was refused with is "(bee: not shown: <the refusal>)", and what only one model
-can read, its thinking and the ids it gave, is sent back only to it. The prompt and the conversation are each cached to
-their end.
+"(bee: no output)", and what only one model can read, its thinking and the ids it gave, is sent back only to it. The
+prompt and the conversation are each cached to their end.
+
+**The provider is the judge.** A request it refuses as it is, it would refuse again, so what commands returned since the
+last reply is sent as "(bee: provider refused: <why>)" from then on, and the turn asks again. So a session never holds
+an answer every request after is refused for.
 
 **The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model what
 to do. Instructions are yours, in `AGENTS.md`, from `~/.bee/agent` and every directory from the root down to the working
