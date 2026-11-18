@@ -30,7 +30,8 @@ const first = args
 // ── Look ────────────────────────────────────────────────────────────────────
 // Each colour means one thing. Amber is you: the mark before all you say, and where you type. Words are in the
 // terminal's own colour, code in gray, and red is what failed. All else is dark: marks, hints, what is waiting, and
-// what this terminal says for itself. What bee thinks is as what it says, only faint and italic.
+// what this terminal says for itself. What bee thinks is as what it says, only faint and italic. A mark is who speaks
+// other than bee: you, or the shell.
 
 const out = process.stdout;
 
@@ -49,6 +50,7 @@ const faint = style("2;3", "22;23");
 
 const pad = "  "; // every row begins with it, or with a mark as wide
 const mark = "› "; // what you say begins with it
+const run = "$ "; // what bee runs begins with it
 const spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"; // the mark, while bee works
 const frame = 80; // how many milliseconds each turn of the spinner shows
 const choices = 8; // how many hints are shown
@@ -165,7 +167,8 @@ function paint({ text, each }: Marked, size: number) {
 }
 
 /** Rows after `lead`: the first begins with it, and the rest under where the first's text begins. */
-const hang = (lead: string, rows: string[]) => rows.map((row, n) => (n ? " ".repeat(width(lead)) : lead) + row);
+const hang = (lead: string, rows: string[]) =>
+  rows.map((row, n) => (n ? row && " ".repeat(width(lead)) + row : lead + row));
 
 /**
  * A line of prose, in the `look` of what it is part of. A heading is bold, and a list item's rows hang under its text.
@@ -529,19 +532,19 @@ function end() {
   draw();
 }
 
-/** Code bee ran, and under it what the code printed. */
+/** Code bee ran, after the shell's mark, and under it what the code printed. */
 function shell({ code, status, output }: Call) {
   const lines = (text: string, paint: Paint, indent = "") =>
     text.split("\n").flatMap((line) => source(indent + line, paint));
   const printed = output.trim() ? lines(output.trimEnd(), dark, pad) : [];
-  return [...lines(code.trim(), status === "failed" ? red : gray), ...printed].map((row) => row && pad + row);
+  return hang(dark(run), [...lines(code.trim(), status === "failed" ? red : gray), ...printed]);
 }
 
 /** What you said: shown, and kept for Up to recall. */
 function user(text: string) {
   history.push(text);
   end();
-  add("user", () => wrap(text).map((row, n) => (n ? pad : amber(mark)) + row));
+  add("user", () => hang(amber(mark), wrap(text)));
 }
 
 /** What this terminal has to say for itself. */

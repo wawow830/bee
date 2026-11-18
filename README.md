@@ -48,10 +48,10 @@ Up and Down recall what you said in the session, as you left it until you send, 
 stops a turn, and pressed twice with nothing typed, begins `/fork`. Ctrl-C clears, stops or quits. Ctrl-A, Ctrl-E,
 Ctrl-W and Ctrl-U edit as in a shell. Ctrl-V pastes an image copied.
 
-While bee works, its work is shown: what it thinks and runs, each thing as one row, and clicking it shows all of it.
-The answer is shown whole as it comes. Once the turn is over, ended or stopped, the work folds away behind what you
-said, and clicking what you said or the answer unfolds it. The wheel scrolls, and Shift-drag selects. On quitting, the
-transcript is left in the terminal as it was last shown.
+While bee works, its work is shown: what it thinks, faint, and what it runs, after a `$`, each thing as one row, and
+clicking it shows all of it. The answer is shown whole as it comes. Once the turn is over, ended or stopped, the work
+folds away behind what you said, and clicking what you said or the answer unfolds it. The wheel scrolls, and Shift-drag
+selects. On quitting, the transcript is left in the terminal as it was last shown.
 
 `/model`, `/thinking`, `/cache`, `/session` and `/fork` each take a value: `/model opus` is the model with `opus` in its
 id, `/session` is `new` or the title of another session here, and `/fork` is something you said in this one. A value
