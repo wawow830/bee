@@ -103,9 +103,9 @@ The model sees an image by writing it, as with `cat`.
 
 **bee speaks to the models itself.** A request is the file's messages, as the API takes them: a reply that failed or was
 stopped is left out, a call nothing answered is answered "(bee: not run)", an answer that says nothing says
-"(bee: no output)", and what only one model can read, its thinking and the ids it gave, is sent back only to it. The
-prompt and the conversation are each cached to their end, and Codex keeps the cache by how the session began, so a fork
-shares it.
+"(bee: no output)", and thinking and the ids a model gave are sent back to any model of the API they were written in.
+The prompt and the conversation are each cached to their end, and Codex keeps the cache by how the session began, so a
+fork shares it.
 
 **The provider is the judge.** A request it refuses as it is, it would refuse again, so what commands returned since the
 last reply is sent as "(bee: provider refused: <why>)" from then on, and the turn asks again. So a session never holds

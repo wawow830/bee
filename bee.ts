@@ -222,9 +222,8 @@ async function* events(body: ReadableStream<Uint8Array>) {
   }
 }
 
-/** Whether a reply is the model's own, so what only it can read is sent back: its thinking, and the ids it gave. */
-const own = (reply: Reply, model: Model) =>
-  reply.provider === model.provider && reply.api === model.api && reply.model === model.id;
+/** Whether a reply was written in a model's API, so its thinking and the ids it gave can be sent back to it. */
+const native = (reply: Reply, model: Model) => reply.api === model.api;
 
 /** What the user said, as blocks. */
 const blocks = (content: User["content"]): (Text | Image)[] =>
@@ -270,7 +269,7 @@ const anthropic: Api = {
       if (block.type === "text") return block.text.trim() ? [{ type: "text", text: block.text }] : [];
       if (block.type === "toolCall")
         return [{ type: "tool_use", id: callId(block.id), name: block.name, input: block.arguments }];
-      if (!own(reply, model) || !block.thinkingSignature) return [];
+      if (!native(reply, model) || !block.thinkingSignature) return [];
       return block.redacted
         ? [{ type: "redacted_thinking", data: block.thinkingSignature }]
         : [{ type: "thinking", thinking: block.thinking, signature: block.thinkingSignature }];
@@ -411,12 +410,12 @@ const codex: Api = {
           : { type: "input_image", image_url: `data:${block.mimeType};base64,${block.data}` },
       );
     const said = (block: Text | Thinking | Call, reply: Reply): object[] => {
-      const mine = own(reply, model);
+      const spoken = native(reply, model);
       if (block.type === "thinking")
-        return mine && block.thinkingSignature ? [JSON.parse(block.thinkingSignature)] : [];
+        return spoken && block.thinkingSignature ? [JSON.parse(block.thinkingSignature)] : [];
       if (block.type === "toolCall") {
         const [call, item] = block.id.split("|");
-        const id = mine && item?.startsWith("fc_") ? { id: item } : {};
+        const id = spoken && item?.startsWith("fc_") ? { id: item } : {};
         return [
           {
             type: "function_call",
@@ -428,7 +427,7 @@ const codex: Api = {
         ];
       }
       if (!block.text.trim()) return [];
-      if (!mine || !block.textSignature) return [{ role: "assistant", content: block.text }];
+      if (!spoken || !block.textSignature) return [{ role: "assistant", content: block.text }];
       const { id, phase } = JSON.parse(block.textSignature);
       const content = [{ type: "output_text", text: block.text, annotations: [] }];
       return [{ type: "message", role: "assistant", content, status: "completed", id, phase }];
