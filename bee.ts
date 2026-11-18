@@ -753,15 +753,15 @@ const IMAGES: Record<string, RegExp> = {
   "image/webp": /^RIFF....WEBP/s,
 };
 
-/** Text as the model is shown it: whole, or its first lines up to SHOWN characters, and how many are not shown. */
-function cut(text: string) {
-  if (text.length <= SHOWN) return text || SILENT;
+/** The head of text too long to show whole: its first lines up to SHOWN characters, and where all of it is. */
+function head(text: string, path: string) {
   const end = text.lastIndexOf("\n", SHOWN);
-  const kept = text.slice(0, end > 0 ? end : SHOWN).replace(/[\ud800-\udbff]$/, ""); // not half a character
-  return `${kept}\n${bee(`output cut, ${(text.length - kept.length).toLocaleString("en")} characters not shown`)}`;
+  const shown = text.slice(0, end > 0 ? end : SHOWN).replace(/[\ud800-\udbff]$/, ""); // not half a character
+  const unshown = (text.length - shown.length).toLocaleString("en");
+  return `${shown}\n${bee(`output cut, ${unshown} characters not shown, full output in ${path}`)}`;
 }
 
-/** Run a command. Returns what it wrote, as text or an image, and whether it failed. */
+/** Run a command. Returns what it wrote, as text or an image, and whether it failed. Text cut keeps its file. */
 async function bash(sid: string, command: string, signal: AbortSignal) {
   // Every command starts in the working directory, so with it gone none can, and the model is told so, not that there
   // is no bash.
@@ -774,14 +774,17 @@ async function bash(sid: string, command: string, signal: AbortSignal) {
   const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", out, out], detached: true });
   const interrupt = () => process.kill(-child.pid!, "SIGINT");
   signal.addEventListener("abort", interrupt);
+  let cut = false;
   try {
     const [status] = await once(child, "exit");
     const written = readFileSync(path);
     const start = written.subarray(0, 12).toString("latin1");
     const format = isUtf8(written) ? "text" : Object.keys(IMAGES).find((type) => IMAGES[type].test(start));
+    const text = written.toString("utf8").trimEnd();
+    cut = format === "text" && text.length > SHOWN;
     const content: Result["content"] =
       format === "text"
-        ? [{ type: "text", text: cut(written.toString("utf8").trimEnd()) }]
+        ? [{ type: "text", text: cut ? head(text, path) : text || SILENT }]
         : format
           ? [{ type: "image", data: written.toString("base64"), mimeType: format }]
           : [{ type: "text", text: UNSUPPORTED }];
@@ -789,7 +792,7 @@ async function bash(sid: string, command: string, signal: AbortSignal) {
   } finally {
     signal.removeEventListener("abort", interrupt);
     closeSync(out);
-    rmSync(path);
+    if (!cut) rmSync(path);
   }
 }
 
