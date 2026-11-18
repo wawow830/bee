@@ -639,10 +639,10 @@ async function forkFrom(cursorId: string, text: string) {
 async function prompt(text: string) {
   unheard.push(text);
   prompts++;
-  let last = false; // whether this answer ends the turn, which answers each prompt in it
-  const done = () => (last = !--prompts) && end();
+  let ends = false; // whether this answer ends the turn, which answers each prompt in it
+  const done = () => (ends = !--prompts) && end();
   const { stopReason } = await call("session/prompt", { sessionId, prompt: [{ type: "text", text }] }).finally(done);
-  if (stopReason !== "end_turn" && last) note(stopReason);
+  if (stopReason !== "end_turn" && ends) note(stopReason);
 }
 
 /** Wait for the turn to end, and for what was queued before; then say `text`, or, for a command, `pick` its value. */
@@ -759,7 +759,7 @@ function splice(from: number, to: number, text = "") {
 /** Put the cursor at `to`, or as near as the prompt allows. */
 const move = (to: number) => (cursor = Math.max(0, Math.min(typed.length, to)));
 
-/** Put a prompt you said in the prompt, `step` further back. Before all you said comes what you are typing. */
+/** Put a prompt you said in the prompt, `step` further back. Below all you said is what you were typing. */
 function recall(step: number) {
   if (!back) draft = typed;
   back = Math.max(0, Math.min(history.length, back + step));

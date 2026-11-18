@@ -938,8 +938,9 @@ function list(cwd?: string) {
   return readdirSync(SESSIONS)
     .flatMap((name) => /^([\w-]+)\.jsonl$/.exec(name)?.[1] ?? [])
     .map((sessionId) => {
+      const all = lines(sessionId);
       const updatedAt = statSync(file(sessionId)).mtime.toISOString();
-      return { sessionId, cwd: cwdOf(sessionId), title: title(lines(sessionId)), updatedAt };
+      return { sessionId, cwd: all[0].cwd!, title: title(all), updatedAt };
     })
     .filter((session) => !cwd || session.cwd === cwd)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
