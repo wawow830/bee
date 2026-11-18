@@ -306,7 +306,6 @@ let writing: { said: "thought" | "reply"; text: string; whole: boolean } | undef
 let usage = ""; // how full its context is
 let title = ""; // what the session is called
 let options: Option[] = []; // the session's settings
-let latest: { cursorId: string; text: string } | undefined; // what you said last, and the cursor before it
 let prompts = 0; // how many bee has not answered: a turn is under way while there are any
 let top: Place | undefined; // where the screen begins, once you have scrolled; else it follows the transcript
 let laid: Row[] = []; // the transcript as rows, as last drawn
@@ -316,6 +315,7 @@ let shown = 0; // how many are on screen
 const transcript: Entry[] = [];
 const ran = new Map<string, Call>(); // what bee ran, by the id of its call
 const quoted = new Map<string, string>(); // what you said in the session, by the id bee gave it
+const forks = new Map<string, string>(); // what you said that a fork can begin before, by the cursor there
 const unheard: string[] = []; // sent, and waiting for bee to hear it
 const queued: string[] = []; // waiting for the turn to end
 const history: string[] = []; // what you have said in the session, for Up to recall
@@ -548,7 +548,7 @@ const updates: Record<string, (update: Update) => void> = {
     user(content.text);
   },
   cursor_update: ({ cursorId, anchor }) => {
-    latest = { cursorId, text: quoted.get(anchor.messageId)! };
+    forks.set(cursorId, quoted.get(anchor.messageId)!);
   },
   agent_thought_chunk: ({ content }) => stream("thought", content.text),
   agent_message_chunk: ({ content }) => stream("reply", content.text),
@@ -620,28 +620,19 @@ const stop = () => send({ method: "session/cancel", params: { sessionId } });
 
 /** Open the session named, showing only what was said in it, or else a new one. */
 async function open(id?: string) {
-  [usage, title, top, latest, back] = ["", "", undefined, undefined, 0];
+  [usage, title, top, back] = ["", "", undefined, 0];
   for (const each of [transcript, history]) each.length = 0;
-  for (const each of [ran, quoted]) each.clear();
+  for (const each of [ran, quoted, forks]) each.clear();
   const opened = await call(id ? "session/load" : "session/new", { sessionId: id, cwd, mcpServers: [] });
   sessionId = id ?? opened.sessionId;
   options = opened.configOptions;
   others = (await sessions()).filter((session) => session.sessionId !== sessionId);
 }
 
-/**
- * Go back to before what you said last: open a fork from there, with what you said back in the prompt, before what is
- * there. The session left stays as it was. Each waits for the one before, so pressed again, it goes further back.
- */
-function rewind() {
-  const step = async () => {
-    if (!latest) return;
-    const { cursorId, text } = latest;
-    await open((await call("session/fork", { sessionId, cursorId, cwd, mcpServers: [] })).sessionId);
-    splice(0, typed.length, [text, typed].filter(Boolean).join("\n\n"));
-    draw();
-  };
-  last = last.then(step).catch((error) => note(error.message, red));
+/** Open a fork of the session from before something you said, with it back in the prompt, before what is there. */
+async function forkFrom(cursorId: string, text: string) {
+  await open((await call("session/fork", { sessionId, cursorId, cwd, mcpServers: [] })).sessionId);
+  splice(0, typed.length, [text, typed].filter(Boolean).join("\n\n"));
 }
 
 /** Send bee a prompt, and wait for its turn to end. One sent while a turn is under way joins it, once bee hears it. */
@@ -668,10 +659,10 @@ function queue(text: string, pick?: () => Promise<unknown>) {
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
-// `/model`, `/thinking` and `/session` each take one of their values. The prompt is a command while it is `/` and the
-// start of a command's id, or a command's id and words; anything else, such as a path, is a prompt. The values that fit
-// the words are those of the best kind of fit there is: the value, the value after its provider, or a part of it. What
-// fits is shown under the prompt. Tab goes through it, and Enter sends the command once only one fits.
+// `/model`, `/thinking`, `/session` and `/fork` each take one of their values. The prompt is a command while it is `/`
+// and the start of a command's id, or a command's id and words; anything else, such as a path, is a prompt. The values
+// that fit the words are those of the best kind of fit there is: the value, the value after its provider, or a part of
+// it. What fits is shown under the prompt. Tab goes through it, and Enter sends the command once only one fits.
 
 /** A command: what it is set to, each of its values, and what picking it does. */
 type Command = { id: string; set: string; values: Map<string, () => Promise<unknown>> };
@@ -683,7 +674,10 @@ function named(values: [string, () => Promise<unknown>][]) {
   return map;
 }
 
-/** Each command. A session is named by its title, so of those alike the latest; and `new` is always a new one. */
+/**
+ * Each command. A session is named by its title, so of those alike the latest; and `new` is always a new one. What you
+ * said is named by its first line, so of those alike the latest.
+ */
 function commands(): Command[] {
   const settings = options.map((option) => ({
     id: option.id,
@@ -705,7 +699,19 @@ function commands(): Command[] {
       ...others.map((other): [string, () => Promise<void>] => [other.title ?? "", () => open(other.sessionId)]),
     ]),
   };
-  return [...settings, session];
+  const fork = {
+    id: "fork",
+    set: "",
+    values: named(
+      [...forks]
+        .reverse()
+        .map(([cursorId, text]): [string, () => Promise<void>] => [
+          text.trim().split("\n")[0],
+          () => forkFrom(cursorId, text),
+        ]),
+    ),
+  };
+  return [...settings, session, fork];
 }
 
 /** The kinds of fit a value can be for the words typed, best first. */
@@ -741,6 +747,7 @@ function read(text: string): { fits: string[]; of?: string; pick?: () => Promise
 
 let back = 0; // how many prompts Up has gone back
 let pasting = false; // between the marks a terminal puts around a paste
+let escaped = 0; // when Esc was last pressed with nothing typed and no turn to stop
 
 /** Put `text` where the prompt runs `from` to `to`, and the cursor after it. */
 function splice(from: number, to: number, text = "") {
@@ -775,6 +782,15 @@ function enter(wait = false) {
   if (command) return queue(command.fits[0], command.pick);
   if (wait || !busy()) return queue(text);
   prompt(text).catch((error) => note(error.message, red));
+}
+
+/** Stop the turn; or, pressed twice in half a second with nothing typed, pick something you said to fork from. */
+function esc() {
+  if (busy()) return stop();
+  if (typed) return;
+  const twice = Date.now() - escaped < 500;
+  escaped = twice ? 0 : Date.now();
+  if (twice) splice(0, 0, "/fork ");
 }
 
 /** The commands that write an image copied, on Wayland and on X. */
@@ -815,7 +831,7 @@ const keys: Record<string, () => unknown> = {
   "\x1b[C": () => move(cursor + 1), // Right
   "\x1b[A": () => recall(1), // Up
   "\x1b[B": () => recall(-1), // Down
-  "\x1b": () => (busy() ? stop() : rewind()), // Esc: stops the turn, or else goes back
+  "\x1b": () => esc(), // Esc
   "\x03": () => (typed ? splice(0, typed.length) : busy() ? stop() : quit()), // Ctrl-C: clears, else stops, else quits
 };
 
@@ -828,7 +844,7 @@ const buttons: Record<number, (row: number) => unknown> = {
 
 /** Take what the terminal sends, a key or a press of the mouse at a time. */
 function press(data: string) {
-  for (const [key] of data.matchAll(/\x1b\[<[\d;]*[Mm]|\x1b\[[\d;]*[^\d;]|\x1b[^]|[^]/g)) {
+  for (const [key] of data.matchAll(/\x1b\[<[\d;]*[Mm]|\x1b\[[\d;]*[^\d;]|\x1b[^\x1b]|[^]/g)) {
     if (key !== "\t") tabbed = "";
     const mouse = key.match(/^\x1b\[<(\d+);\d+;(\d+)([Mm])$/);
     if (mouse) mouse[3] === "M" && buttons[+mouse[1]]?.(+mouse[2]);
