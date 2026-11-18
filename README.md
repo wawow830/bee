@@ -76,8 +76,9 @@ harness reads the file before every step and keeps no other state. For each sett
 `{cache}`, the latest line holds.
 
 **One tool.** `bash`: "Every command starts in the working directory. Returns the output, cut at 12,000 characters, or
-the image written." One that ends elsewhere is told "Shell cwd was reset to <it>", as Claude Code tells it. The computer
-is what lasts: files, and whatever a command left running.
+the image written." One that ends elsewhere is told "Shell cwd was reset to <it>", as Claude Code tells it, and with the
+working directory gone, every one is told it does not exist. The computer is what lasts: files, and whatever a command
+left running.
 
 **An image is a file.** One pasted, in the editor or with Ctrl-V, is written to a file, and its path is what you said.
 The model sees an image by writing it, as with `cat`. One larger than a model is shown fails, so a session never holds

@@ -722,10 +722,13 @@ const IMAGES: Record<string, RegExp> = {
 
 /** Run a command. Returns what it wrote, as an image or as text cut to its two ends, and whether it failed. */
 async function bash(sid: string, command: string, signal: AbortSignal) {
+  // Every command starts in the working directory, so with it gone none can, and the model is told so, not that there
+  // is no bash.
+  const cwd = cwdOf(sid);
+  if (!existsSync(cwd)) throw new Error(`The working directory ${cwd} does not exist.`);
   // Written to a file, not a pipe, so the call ends when the command does, whatever it left running.
   const path = join(tmpdir(), `bee-${randomUUID()}`);
   const out = openSync(path, "w");
-  const cwd = cwdOf(sid);
   const left = path + ".cwd"; // where bash is when it exits
   // In its own process group, so an interrupt stops all of it.
   const child = spawn("bash", ["-c", `trap 'pwd > "${left}"' EXIT\n${command}`], {
