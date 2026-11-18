@@ -83,9 +83,10 @@ is what lasts: files, and whatever a command left running.
 The model sees an image by writing it, as with `cat`. One larger than a model is shown fails, so a session never holds
 one a provider would refuse.
 
-**bee speaks to the models itself.** A request is the file's messages, as the API takes them: a reply that failed or
-was stopped is left out, a call nothing answered is answered "Not run.", and what only one model can read, its thinking
-and the ids it gave, is sent back only to it. The prompt and the conversation are each cached to their end.
+**bee speaks to the models itself.** A request is the file's messages, as the API takes them: a reply that failed or was
+stopped is left out, a call nothing answered is answered "(not run)", an answer that says nothing says "(no output)",
+and what only one model can read, its thinking and the ids it gave, is sent back only to it. The prompt and the
+conversation are each cached to their end.
 
 **The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model what
 to do. Instructions are yours, in `AGENTS.md`, from `~/.bee/agent` and every directory from the root down to the working

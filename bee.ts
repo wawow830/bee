@@ -73,8 +73,9 @@ type Result = {
 };
 type Message = System | User | Reply | Result;
 
-/** What a tool that said nothing says. */
+/** What stands where a tool said nothing, and where a call was not run. */
 const SILENT = "(no output)";
+const UNRUN = "(not run)";
 
 const user = (content: User["content"]): User => ({ role: "user", content, timestamp: Date.now() });
 const result = (call: Call, content: Result["content"], isError: boolean): Result => ({
@@ -163,7 +164,7 @@ function sendable(messages: Message[]): Message[] {
   const sent: Message[] = [];
   const unanswered = new Map<string, Call>();
   const close = () => {
-    for (const call of unanswered.values()) sent.push(result(call, [{ type: "text", text: "Not run." }], true));
+    for (const call of unanswered.values()) sent.push(result(call, [{ type: "text", text: UNRUN }], true));
     unanswered.clear();
   };
   for (const message of messages) {
