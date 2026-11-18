@@ -18,7 +18,7 @@ import {
   writeSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import {
   clampThinkingLevel,
@@ -220,8 +220,6 @@ async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<str
       if (signal.aborted) return "cancelled";
       const reply = await ask(sid, signal);
       const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
-      for (const { arguments: args } of calls)
-        if (typeof args.command === "string") args.command = needless(cwdOf(sid), args.command);
       append(sid, { message: reply });
       for (const call of calls) if (!signal.aborted) append(sid, { message: await run(sid, call, signal) });
       if (reply.stopReason === "error") throw new Error(reply.errorMessage);
@@ -242,16 +240,6 @@ const IMAGES: Record<string, RegExp> = {
   "image/gif": /^GIF8/,
   "image/webp": /^RIFF....WEBP/s,
 };
-
-/**
- * A command without the cd it begins with to where it starts anyway. Once a model has put one before a command it puts
- * one before every command after; without it in what was said, it does not.
- */
-function needless(cwd: string, command: string) {
-  const cd = command.match(/^\s*cd\s+(["']?)([^\s;&|<>"']+)\1\s*(?:&&|;|\n)\s*/);
-  const rest = cd ? command.slice(cd[0].length) : "";
-  return cd && rest.trim() && resolve(cwd, cd[2].replace(/^~(?=\/|$)/, homedir())) === cwd ? rest : command;
-}
 
 /** Run a command. Returns what it wrote, as an image or as text cut to its two ends, and whether it failed. */
 async function bash(sid: string, command: string, signal: AbortSignal) {
