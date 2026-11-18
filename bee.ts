@@ -744,11 +744,17 @@ function head(text: string, path: string) {
   return `${shown}\n${bee(`${unshown} characters not shown, full output in ${path}`)}`;
 }
 
-/** Run a command. Returns what it wrote, as text or an image, and whether it failed. Text cut keeps its file. */
-async function bash(sid: string, command: string, signal: AbortSignal) {
+/**
+ * Run the command a call asks for. Returns what it wrote, as text or an image, and whether it failed. Text cut keeps its
+ * file. A call that cannot run throws why.
+ */
+async function bash(sid: string, call: Call, signal: AbortSignal) {
+  const { command } = call.arguments;
+  const cwd = cwdOf(sid);
+  if (call.name !== BASH.name) throw new Error("tool does not exist");
+  if (typeof command !== "string") throw new Error("command is not a string");
   // Every command starts in the working directory, so with it gone none can, and the model is told so, not that there
   // is no bash.
-  const cwd = cwdOf(sid);
   if (!existsSync(cwd)) throw new Error("working directory does not exist");
   // Written to a file, not a pipe, so the call ends when the command does, whatever it left running.
   const path = join(tmpdir(), `bee-${randomUUID()}`);
@@ -779,20 +785,13 @@ async function bash(sid: string, command: string, signal: AbortSignal) {
   }
 }
 
-/** The command a call runs. One that is not a command is told why. */
-function runnable(call: Call) {
-  const { command } = call.arguments;
-  if (call.name !== BASH.name) throw new Error("tool does not exist");
-  if (typeof command !== "string") throw new Error("command is not a string");
-  return command;
-}
-
 /** Run one tool call, shown to the editor. One that cannot be run is told why, by bee. */
 async function run(sid: string, call: Call, signal: AbortSignal) {
   showCall(sid, call);
-  const { content, failed } = await Promise.resolve()
-    .then(() => bash(sid, runnable(call), signal))
-    .catch((error: Error) => ({ content: [{ type: "text" as const, text: bee(error.message) }], failed: true }));
+  const { content, failed } = await bash(sid, call, signal).catch((error: Error) => ({
+    content: [{ type: "text" as const, text: bee(error.message) }],
+    failed: true,
+  }));
   const answer = result(call, content, failed);
   showResult(sid, call, answer);
   return answer;
