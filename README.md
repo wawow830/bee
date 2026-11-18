@@ -48,19 +48,22 @@ bee "…"        # start with a prompt
 ```
 
 Enter sends. While bee works, Enter steers: bee reads what you said once the commands it is running end, in the same
-turn. Alt-Enter queues it for when the turn is over. Ctrl-J is a new line. Up and Down recall what you said in the
-session, Esc stops a turn, Ctrl-C clears, stops or quits. Ctrl-A, Ctrl-E, Ctrl-W and Ctrl-U edit as in a shell. Ctrl-V
-pastes an image copied.
+turn, and until then it waits under the transcript. Alt-Enter queues it for when the turn is over. Ctrl-J is a new line.
+Up and Down recall what you said in the session, Esc stops a turn, Ctrl-C clears, stops or quits. Ctrl-A, Ctrl-E, Ctrl-W
+and Ctrl-U edit as in a shell. Ctrl-V pastes an image copied.
 
 While bee works, its work is shown: what it thinks and runs, each thing as one row, and clicking it shows all of it.
 The answer is shown whole as it comes. Once the turn is over, ended or stopped, the work folds away behind what you
 said, and clicking what you said or the answer unfolds it. The wheel scrolls, and Shift-drag selects. On quitting, the
 transcript is left in the terminal as it was last shown.
 
-`/model`, `/thinking` and `/session` each take a value: `/model opus` is the model with `opus` in its id, and
-`/session` is `new` or the title of another session here. A value named whole, or without its provider, is the one
-meant, whatever its case. What fits is shown under the prompt as you type. Tab goes through it, and Enter sends the
-command once only one fits. Anything else that starts with `/`, such as a path, is a prompt.
+`/model`, `/thinking`, `/session` and `/rewind` each take a value: `/model opus` is the model with `opus` in its id,
+`/session` is `new`, `fork` or the title of another session here, and `/rewind` is something you said in this one. A
+fork begins as this session is; rewinding to what you said forks from before it, and puts it back in the prompt to say
+again. The session you leave stays as it was, so each branch is a session, and the screen shows the one you are in. A
+value named whole, or without its provider, is the one meant, whatever its case. What fits is shown under the prompt as
+you type. Tab goes through it, and Enter sends the command once only one fits. Anything else that starts with `/`, such
+as a path, is a prompt.
 
 ## How it works
 

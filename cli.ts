@@ -269,15 +269,15 @@ function render(text: string, whole: boolean, voice: Voice) {
 }
 
 // ── Screen ──────────────────────────────────────────────────────────────────
-// The screen is bee's own: the transcript, and under it what you have queued and the prompt, each set apart from the
-// one before by a blank row. The transcript is turns, each what you said and what came of it. Its answer is the last
-// thing bee said, if nothing came after it, and is shown whole as it comes. Before it is the work: what bee thought and
-// ran, and what it said on the way. While bee works, the work is shown, each thing as its first row, and clicking it
-// shows all of it: the whole thought, or the whole command and what it printed. Once the turn is over, ended or
-// stopped, the work folds away behind what you said, and clicking what you said or the answer unfolds it. The wheel
-// scrolls, and at the bottom the transcript follows what comes. Where you have scrolled to is a place in what was said,
-// not a row, so it stays put as the screen's width changes and things fold and open. On leaving, the transcript is left
-// in the terminal as it was last shown.
+// The screen is bee's own: the session's transcript, and under it what bee has not heard yet and the prompt, each set
+// apart from the one before by a blank row. The transcript is turns, each what you said and what came of it, in the
+// order bee heard and said them. Its answer is the last thing bee said, if nothing came after it, and is shown whole as
+// it comes. Before it is the work: what bee thought and ran, and what it said on the way. While bee works, the work is
+// shown, each thing as its first row, and clicking it shows all of it: the whole thought, or the whole command and what
+// it printed. Once the turn is over, ended or stopped, the work folds away behind what you said, and clicking what you
+// said or the answer unfolds it. The wheel scrolls, and at the bottom the transcript follows what comes. Where you have
+// scrolled to is a place in what was said, not a row, so it stays put as the screen's width changes and things fold and
+// open. On leaving, the transcript is left in the terminal as it was last shown.
 
 type Option = { id: string; currentValue: string; options: { value: string }[] };
 
@@ -314,6 +314,9 @@ let bottom = 0; // the first on screen at the bottom
 let shown = 0; // how many are on screen
 const transcript: Entry[] = [];
 const ran = new Map<string, Call>(); // what bee ran, by the id of its call
+const quoted = new Map<string, string>(); // what you said in the session, by the id bee gave it
+const rewinds = new Map<string, string>(); // what you said that a fork can begin before, by the cursor there
+const unheard: string[] = []; // sent, and waiting for bee to hear it
 const queued: string[] = []; // waiting for the turn to end
 const history: string[] = []; // what you have said, here and in the sessions opened, for Up to recall
 
@@ -454,7 +457,7 @@ function draw() {
     }),
     ...(more ? [pad + " ".repeat(from) + dark(`${more} more`)] : []),
   ];
-  const waiting = queued.map((text) => amber(mark) + dark(text.split("\n")[0].slice(0, room())));
+  const waiting = [...unheard, ...queued].map((text) => amber(mark) + dark(text.split("\n")[0].slice(0, room())));
   const prompt: string[] = []; // all under the transcript, each part set apart from the one before by a blank row
   for (const own of [waiting, typing]) {
     if (own.length && (rows.length || prompt.length)) prompt.push("");
@@ -506,8 +509,9 @@ function shell({ code, status, output }: Call) {
   return [...lines(code.trim(), status === "failed" ? red : gray), ...printed].map((row) => row && pad + row);
 }
 
-/** What you said. */
+/** What you said, to recall. */
 function user(text: string) {
+  history.push(text);
   end();
   add("user", () => wrap(text).map((row, n) => (n ? pad : amber(mark)) + row));
 }
@@ -523,6 +527,9 @@ function note(text: string, look = dark) {
 /** The fields of the updates read here. */
 type Update = {
   content: { text: string };
+  messageId: string;
+  cursorId: string;
+  anchor: { messageId: string };
   toolCallId: string;
   rawInput: { command: string };
   rawOutput: string;
@@ -533,10 +540,15 @@ type Update = {
 };
 
 const updates: Record<string, (update: Update) => void> = {
-  // What was said in a session opened.
-  user_message_chunk: ({ content }) => {
-    history.push(content.text);
+  // What you said, as bee heard it: in a session opened, or once a turn reads it.
+  user_message_chunk: ({ content, messageId }) => {
+    unheard.shift();
+    quoted.set(messageId, content.text);
     user(content.text);
+  },
+  cursor_update: ({ cursorId, anchor }) => {
+    rewinds.set(cursorId, quoted.get(anchor.messageId)!);
+    draw();
   },
   agent_thought_chunk: ({ content }) => stream("thought", content.text),
   agent_message_chunk: ({ content }) => stream("reply", content.text),
@@ -606,19 +618,27 @@ let last: Promise<unknown> = Promise.resolve(); // the last thing you sent, done
 const sessions = async (): Promise<Session[]> => (await call("session/list", { cwd })).sessions;
 const stop = () => send({ method: "session/cancel", params: { sessionId } });
 
-/** Open the session named, showing what was said in it, or else a new one. */
+/** Open the session named, showing only what was said in it, or else a new one. */
 async function open(id?: string) {
   usage = "";
   title = "";
+  top = undefined;
+  transcript.length = 0;
+  for (const each of [ran, quoted, rewinds]) each.clear();
   const opened = await call(id ? "session/load" : "session/new", { sessionId: id, cwd, mcpServers: [] });
   sessionId = id ?? opened.sessionId;
   options = opened.configOptions;
   others = (await sessions()).filter((session) => session.sessionId !== sessionId);
 }
 
-/** Send bee a prompt, and wait for its turn to end. One sent while a turn is under way joins it. */
+/** Fork the session, at the cursor before something said in it or else whole, and open the fork. */
+async function fork(cursorId?: string) {
+  await open((await call("session/fork", { sessionId, cursorId, cwd, mcpServers: [] })).sessionId);
+}
+
+/** Send bee a prompt, and wait for its turn to end. One sent while a turn is under way joins it, once bee hears it. */
 async function prompt(text: string) {
-  user(text);
+  unheard.push(text);
   prompts++;
   const done = () => {
     if (--prompts) return; // the turn answers each prompt in it
@@ -642,10 +662,10 @@ function queue(text: string, pick?: () => Promise<unknown>) {
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
-// `/model`, `/thinking` and `/session` each take one of their values. The prompt is a command while it is `/` and the
-// start of a command's id, or a command's id and words; anything else, such as a path, is a prompt. The values that fit
-// the words are those of the best kind of fit there is: the value, the value after its provider, or a part of it. What
-// fits is shown under the prompt. Tab goes through it, and Enter sends the command once only one fits.
+// `/model`, `/thinking`, `/session` and `/rewind` each take one of their values. The prompt is a command while it is
+// `/` and the start of a command's id, or a command's id and words; anything else, such as a path, is a prompt. The
+// values that fit the words are those of the best kind of fit there is: the value, the value after its provider, or a
+// part of it. What fits is shown under the prompt. Tab goes through it, and Enter sends the command once only one fits.
 
 /** A command: what it is set to, each of its values, and what picking it does. */
 type Command = { id: string; set: string; values: Map<string, () => Promise<unknown>> };
@@ -657,7 +677,11 @@ function named(values: [string, () => Promise<unknown>][]) {
   return map;
 }
 
-/** Each command. A session is named by its title, so of those alike the latest; and `new` is always a new one. */
+/**
+ * Each command. A session is named by its title, so of those alike the latest; `new` is always a new one, and `fork` one
+ * that begins as this one is. What you said is named by its first line, so of those alike the latest; rewinding to it is
+ * a fork from before it, with it back in the prompt.
+ */
 function commands(): Command[] {
   const settings = options.map((option) => ({
     id: option.id,
@@ -676,10 +700,24 @@ function commands(): Command[] {
     set: [usage, title && `"${title}"`, sessionId].filter(Boolean).join(" "),
     values: named([
       ["new", () => open()],
+      ["fork", () => fork()],
       ...others.map((other): [string, () => Promise<void>] => [other.title ?? "", () => open(other.sessionId)]),
     ]),
   };
-  return [...settings, session];
+  const rewind = {
+    id: "rewind",
+    set: "",
+    values: named(
+      [...rewinds].reverse().map(([cursorId, text]): [string, () => Promise<void>] => [
+        text.trim().split("\n")[0],
+        async () => {
+          await fork(cursorId);
+          splice(0, typed.length, text);
+        },
+      ]),
+    ),
+  };
+  return [...settings, session, rewind];
 }
 
 /** The kinds of fit a value can be for the words typed, best first. */
@@ -743,7 +781,6 @@ function enter(wait = false) {
   const text = typed.trim();
   const command = read(typed);
   if (!text || (command && !command.pick)) return; // a command, but not one value yet
-  history.push(text);
   back = 0;
   top = undefined; // the transcript follows again
   splice(0, typed.length);
@@ -820,7 +857,7 @@ function press(data: string) {
 // A screen of bee's own, the marks a terminal puts around a paste, and where the mouse is pressed.
 out.write("\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h");
 const fatal = (error: Error) => quit(1, error.message + "\n");
-await call("initialize", { protocolVersion: 1, clientCapabilities: {} }).catch(fatal);
+await call("initialize", { protocolVersion: 1, clientCapabilities: { session: { cursors: {} } } }).catch(fatal);
 const latest = resume ? (await sessions().catch(fatal))[0] : undefined;
 await open(latest?.sessionId).catch(fatal);
 
