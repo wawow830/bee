@@ -75,10 +75,13 @@ type Result = {
 };
 type Message = System | User | Reply | Result;
 
+/** What bee says in a tool's answer, set apart from all a command wrote. */
+const bee = (words: string) => `(bee: ${words})`;
+
 /** What stands where a tool said nothing, where a call was not run, and where a command wrote neither. */
-const SILENT = "(no output)";
-const UNRUN = "(not run)";
-const NEITHER = "The output is neither text nor an image.";
+const SILENT = bee("no output");
+const UNRUN = bee("not run");
+const NEITHER = bee("the output is neither text nor an image");
 
 /** Whether a tool's answer shows the model an image. */
 const shows = (message: Message): message is Result =>
@@ -207,7 +210,7 @@ const refused = (message: Message, why: string): Message =>
     ? {
         ...message,
         content: message.content.map((block) =>
-          block.type === "image" ? { type: "text", text: `Not shown: ${why}` } : block,
+          block.type === "image" ? { type: "text", text: bee(`not shown: ${why}`) } : block,
         ),
       }
     : message;
@@ -755,7 +758,7 @@ async function bash(sid: string, command: string, signal: AbortSignal) {
   // Every command starts in the working directory, so with it gone none can, and the model is told so, not that there
   // is no bash.
   const cwd = cwdOf(sid);
-  if (!existsSync(cwd)) throw new Error(`The working directory ${cwd} does not exist.`);
+  if (!existsSync(cwd)) throw new Error(`the working directory ${cwd} does not exist`);
   // Written to a file, not a pipe, so the call ends when the command does, whatever it left running.
   const path = join(tmpdir(), `bee-${randomUUID()}`);
   const out = openSync(path, "w");
@@ -773,15 +776,16 @@ async function bash(sid: string, command: string, signal: AbortSignal) {
     const written = readFileSync(path);
     const start = written.subarray(0, 12).toString("latin1");
     const mimeType = Object.keys(IMAGES).find((type) => IMAGES[type].test(start));
-    // Every command starts in the session's directory. One that ends elsewhere is told so, as Claude Code tells it.
+    // Every command starts in the session's directory. One that ends elsewhere is told so.
     const ended = read(left).trim();
-    const reset = ended && ended !== cwd ? `Shell cwd was reset to ${cwd}` : "";
+    const reset = ended && ended !== cwd ? bee(`shell cwd was reset to ${cwd}`) : "";
     // What a command writes is an image, whole, or text. Anything else is neither, and fails.
     const neither = !mimeType && !isUtf8(written);
     const output = mimeType ? "" : neither ? NEITHER : written.toString("utf8").trimEnd();
     const text = [output, reset].filter(Boolean).join("\n");
     const cut = text.length - SHOWN;
-    const told = cut <= 0 ? text : `${text.slice(0, SHOWN / 2)}\n[${cut} characters cut]\n${text.slice(-SHOWN / 2)}`;
+    const told =
+      cut <= 0 ? text : `${text.slice(0, SHOWN / 2)}\n${bee(`${cut} characters cut`)}\n${text.slice(-SHOWN / 2)}`;
     const content: Result["content"] = mimeType
       ? [
           { type: "image", data: written.toString("base64"), mimeType },
@@ -800,17 +804,17 @@ async function bash(sid: string, command: string, signal: AbortSignal) {
 /** The command a call runs. One that is not a command is told why. */
 function runnable(call: Call) {
   const { command } = call.arguments;
-  if (call.name !== BASH.name) throw new Error(`There is no tool ${call.name}; there is ${BASH.name}.`);
-  if (typeof command !== "string") throw new Error(`${BASH.name} takes a command, as a string.`);
+  if (call.name !== BASH.name) throw new Error(`there is no tool ${call.name}; there is ${BASH.name}`);
+  if (typeof command !== "string") throw new Error(`${BASH.name} takes a command, as a string`);
   return command;
 }
 
-/** Run one tool call, shown to the editor. */
+/** Run one tool call, shown to the editor. One that cannot be run is told why, by bee. */
 async function run(sid: string, call: Call, signal: AbortSignal) {
   showCall(sid, call);
   const { content, failed } = await Promise.resolve()
     .then(() => bash(sid, runnable(call), signal))
-    .catch((error: Error) => ({ content: [{ type: "text" as const, text: error.message }], failed: true }));
+    .catch((error: Error) => ({ content: [{ type: "text" as const, text: bee(error.message) }], failed: true }));
   const answer = result(call, content, failed);
   showResult(sid, call, answer);
   return answer;
