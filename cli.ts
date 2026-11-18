@@ -613,7 +613,7 @@ async function open(id?: string) {
   const opened = await call(id ? "session/load" : "session/new", { sessionId: id, cwd, mcpServers: [] });
   sessionId = id ?? opened.sessionId;
   options = opened.configOptions;
-  others = (await sessions()).filter((session) => session.title && session.sessionId !== sessionId);
+  others = (await sessions()).filter((session) => session.sessionId !== sessionId);
 }
 
 /** Send bee a prompt, and wait for its turn to end. One sent while a turn is under way joins it. */
@@ -676,7 +676,7 @@ function commands(): Command[] {
     set: [usage, title && `"${title}"`, sessionId].filter(Boolean).join(" "),
     values: named([
       ["new", () => open()],
-      ...others.map((other): [string, () => Promise<void>] => [other.title!, () => open(other.sessionId)]),
+      ...others.map((other): [string, () => Promise<void>] => [other.title ?? "", () => open(other.sessionId)]),
     ]),
   };
   return [...settings, session];
@@ -821,7 +821,7 @@ function press(data: string) {
 out.write("\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h");
 const fatal = (error: Error) => quit(1, error.message + "\n");
 await call("initialize", { protocolVersion: 1, clientCapabilities: {} }).catch(fatal);
-const latest = resume ? (await sessions().catch(fatal)).find((session) => session.title) : undefined;
+const latest = resume ? (await sessions().catch(fatal))[0] : undefined;
 await open(latest?.sessionId).catch(fatal);
 
 process.stdin.setRawMode(true).setEncoding("utf8").on("data", press);
