@@ -644,9 +644,9 @@ function lines(sid: string): Line[] {
 }
 
 /**
- * Add a line to a session. The first message makes the file, with the lines held before it, and names the session, so
- * no file is a session nothing was said in. Nothing else makes it, so a session deleted stays deleted: a line written
- * to a new file would be a session with no beginning, which no model will take and no one can list.
+ * Add a line to a session, and describe it as the file now says. The first message makes the file, with the lines held
+ * before it, so no file is a session nothing was said in. Nothing else makes it, so a session deleted stays deleted: a
+ * line written to a new file would be a session with no beginning, which no model will take and no one can list.
  */
 function append(sid: string, ...added: Line[]) {
   const held = unborn.get(sid);
@@ -663,7 +663,7 @@ function append(sid: string, ...added: Line[]) {
   } finally {
     closeSync(fd);
   }
-  if (held) info(sid);
+  describe(sid);
 }
 
 const cwdOf = (sid: string) => lines(sid)[0].cwd!;
@@ -690,9 +690,7 @@ function settings(sid: string) {
 async function ask(sid: string, signal: AbortSignal) {
   const { model, thinking, cache } = settings(sid);
   const tell: Tell = (type, words) => say(sid, type === "text" ? "agent_message" : "agent_thought", words);
-  const reply = await stream(model, conversation(sid), { sessionId: sid, thinking, cache, signal }, tell);
-  usage(sid, reply);
-  return reply;
+  return stream(model, conversation(sid), { sessionId: sid, thinking, cache, signal }, tell);
 }
 
 /** A turn under way: how to stop it, what the user said that it has not read, and how it ends. */
@@ -817,29 +815,25 @@ const update = (sessionId: string, fields: object) =>
 const say = (sid: string, who: "user_message" | "agent_message" | "agent_thought", words: string) =>
   words && update(sid, { sessionUpdate: `${who}_chunk`, content: { type: "text", text: words } });
 
-/** Whether the model counted the tokens of a reply. One that failed or was stopped first did not. */
-const counted = (message: Message): message is Reply => message.role === "assistant" && message.usage.totalTokens > 0;
-
-/** How full the context is: the tokens in the conversation, as the model counted them in a reply. */
-const usage = (sid: string, reply: Reply) =>
-  counted(reply) &&
-  update(sid, {
-    sessionUpdate: "usage_update",
-    used: reply.usage.totalTokens,
-    size: settings(sid).model.contextWindow,
-  });
-
 /** What the session is called: the start of the first line the user said in it. */
 const title = (sid: string) => {
   const first = conversation(sid).find((message) => message.role === "user")?.content ?? "";
   return plain(first).trim().split("\n")[0].slice(0, 80) || undefined;
 };
 
-/** Tell the editor what the session is called, once the user has said something in it. */
-const info = (sid: string) => {
+/**
+ * Tell the editor what the file says of the session: what it is called, and how full the context of the model chosen
+ * is, as the last reply counted it. A reply that failed or was stopped first counted nothing.
+ */
+function describe(sid: string) {
   const called = title(sid);
+  const counted = conversation(sid).findLast(
+    (message): message is Reply => message.role === "assistant" && message.usage.totalTokens > 0,
+  );
+  const size = settings(sid).model.contextWindow;
   if (called) update(sid, { sessionUpdate: "session_info_update", title: called });
-};
+  if (counted) update(sid, { sessionUpdate: "usage_update", used: counted.usage.totalTokens, size });
+}
 
 /** A message's content, as plain text. */
 const plain = (content: string | { type: string; text?: string }[]) =>
@@ -933,11 +927,9 @@ const parts = (blocks: any[]): User["content"] =>
         : { type: "text", text: block.text ?? block.uri ?? "" },
   );
 
-/** A session the editor opens, what it is called, and how full its context was at the last reply counted. */
+/** A session the editor opens, described. */
 function open(sessionId: string) {
-  const last = conversation(sessionId).findLast(counted);
-  info(sessionId);
-  if (last) usage(sessionId, last);
+  describe(sessionId);
   return { sessionId, configOptions: options(sessionId) };
 }
 
