@@ -73,6 +73,9 @@ type Result = {
 };
 type Message = System | User | Reply | Result;
 
+/** What a tool that said nothing says. */
+const SILENT = "(no output)";
+
 const user = (content: User["content"]): User => ({ role: "user", content, timestamp: Date.now() });
 const result = (call: Call, content: Result["content"], isError: boolean): Result => ({
   role: "toolResult",
@@ -153,8 +156,8 @@ async function stream(model: Model, messages: Message[], chosen: Options, tell: 
 }
 
 /**
- * The conversation as an API takes it: a reply that failed or was stopped is left out, with what answered it, and a
- * call nothing answered is answered as not run.
+ * The conversation as an API takes it: a reply that failed or was stopped is left out, with what answered it, a call
+ * nothing answered is answered as not run, and an answer that says nothing says so.
  */
 function sendable(messages: Message[]): Message[] {
   const sent: Message[] = [];
@@ -165,7 +168,9 @@ function sendable(messages: Message[]): Message[] {
   };
   for (const message of messages) {
     if (message.role === "toolResult") {
-      if (unanswered.delete(message.toolCallId)) sent.push(message);
+      const silent = message.content.every((block) => block.type === "text" && !block.text.trim());
+      const said: Result = silent ? { ...message, content: [{ type: "text", text: SILENT }] } : message;
+      if (unanswered.delete(message.toolCallId)) sent.push(said);
       continue;
     }
     close();
@@ -743,7 +748,7 @@ async function bash(sid: string, command: string, signal: AbortSignal) {
     const output = big
       ? `The image is ${bytes} bytes; a model is shown at most ${SEEN.toLocaleString("en")}.`
       : written.toString("utf8").trimEnd();
-    const text = [output, reset].filter(Boolean).join("\n") || "(no output)";
+    const text = [output, reset].filter(Boolean).join("\n") || SILENT;
     const cut = text.length - SHOWN;
     const content: Result["content"] =
       mimeType && !big
