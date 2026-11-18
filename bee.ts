@@ -40,52 +40,46 @@ function parse(line: string) {
   }
 }
 
-// ── Messages ────────────────────────────────────────────────────────────────
-// What a session's file holds: what was said, by the user, the model and the tool.
+// ── Said ────────────────────────────────────────────────────────────────────
+// What a session's file holds: how it began, and what was said in it, by the user, a model and a command. What only a
+// model's provider can read is `sealed`, as the provider gave it: its thinking, and the ids it gave.
 
-type Text = { type: "text"; text: string; textSignature?: string };
+type Text = { type: "text"; text: string; sealed?: any };
 type Image = { type: "image"; data: string; mimeType: string };
-type Thinking = { type: "thinking"; thinking: string; thinkingSignature?: string; redacted?: boolean };
-type Call = { type: "toolCall"; id: string; name: string; arguments: Record<string, unknown> };
+type Thinking = { type: "thinking"; text: string; sealed?: any; redacted?: boolean };
+type Call = { type: "call"; id: string; name: string; arguments: Record<string, unknown>; sealed?: any };
 type Tool = { name: string; description: string; parameters: object };
-type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number };
+type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number };
 
-/** How the session began: the prompt, and the tool. */
-type System = { role: "system"; content: string; toolsAdded: Tool[]; timestamp: number };
-type User = { role: "user"; content: string | (Text | Image)[]; timestamp: number };
+/** How the session began: where, the prompt, and the tools. */
+type Began = { cwd: string; prompt: string; tools: Tool[]; timestamp: number };
+type User = { content: (Text | Image)[]; timestamp: number };
+/**
+ * What a model said. `end`: how it ended, if not of itself: cut at its longest, stopped, failed, or refused, the
+ * request being refused as it was, so the same again would be refused again. `why`: the error it ended with.
+ */
 type Reply = {
-  role: "assistant";
-  content: (Text | Thinking | Call)[];
   provider: string;
   model: string;
+  content: (Text | Thinking | Call)[];
   usage: Usage;
-  /** "refused": the provider refused the request as it was, so the same again it would refuse again. */
-  stopReason: "stop" | "length" | "toolUse" | "error" | "aborted" | "refused";
-  errorMessage?: string;
   timestamp: number;
+  end?: "cut" | "stopped" | "failed" | "refused";
+  why?: string;
 };
-type Result = {
-  role: "toolResult";
-  toolCallId: string;
-  toolName: string;
-  content: (Text | Image)[];
-  isError: boolean;
-  timestamp: number;
-};
+/** What a command returned, to the call that asked for it. */
+type Result = { call: string; content: (Text | Image)[]; failed: boolean; timestamp: number };
 /** What is said once the session has begun. */
-type Said = User | Reply | Result;
-type Message = System | Said;
+type Said = { user: User } | { reply: Reply } | { result: Result };
 
-/** What bee says in a tool's answer, set apart from all a command wrote. */
+/** What bee says in what a command returned, set apart from all the command wrote. */
 const bee = (words: string) => `(bee: ${words})`;
 
-const user = (content: User["content"]): User => ({ role: "user", content, timestamp: Date.now() });
-const result = (call: Call, content: Result["content"], isError: boolean): Result => ({
-  role: "toolResult",
-  toolCallId: call.id,
-  toolName: call.name,
+const user = (content: User["content"]): User => ({ content, timestamp: Date.now() });
+const result = (call: Call, content: Result["content"], failed: boolean): Result => ({
+  call: call.id,
   content,
-  isError,
+  failed,
   timestamp: Date.now(),
 });
 
@@ -120,29 +114,21 @@ type Api = {
   models(listing: any): Listed[];
   request(
     model: Model,
-    messages: Message[],
+    began: Began,
+    said: Said[],
     options: Options,
   ): { url: string; headers: Record<string, string>; body: object };
-  /** Fills the reply as the events come, and returns how it stopped. A reply that fails throws. */
-  read(incoming: AsyncIterable<any>, reply: Reply, tell: Tell): Promise<"stop" | "length" | "toolUse">;
+  /** Fills the reply as the events come, with how it ended if not of itself. A reply that fails throws. */
+  read(incoming: AsyncIterable<any>, reply: Reply, tell: Tell): Promise<void>;
 };
 
 /** One reply from a model, its words and thoughts told as they come. One that fails or is stopped says so. */
-async function stream(model: Model, messages: Message[], chosen: Options, tell: Tell): Promise<Reply> {
+async function stream(model: Model, began: Began, said: Said[], chosen: Options, tell: Tell): Promise<Reply> {
   const api = PROVIDERS[model.provider];
-  const { provider, id } = model;
-  const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
-  const reply: Reply = {
-    role: "assistant",
-    content: [],
-    provider,
-    model: id,
-    usage,
-    stopReason: "stop",
-    timestamp: Date.now(),
-  };
+  const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  const reply: Reply = { provider: model.provider, model: model.id, content: [], usage, timestamp: Date.now() };
   try {
-    const { url, headers, body } = api.request(model, sendable(messages), chosen);
+    const { url, headers, body } = api.request(model, began, sendable(said), chosen);
     const response = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json", ...headers },
@@ -151,10 +137,10 @@ async function stream(model: Model, messages: Message[], chosen: Options, tell: 
     });
     const { status } = response;
     if (!response.ok) throw Object.assign(new Error(`${status} ${await response.text()}`), { status });
-    reply.stopReason = await api.read(events(response.body!), reply, tell);
+    await api.read(events(response.body!), reply, tell);
   } catch (error: any) {
-    reply.stopReason = chosen.signal.aborted ? "aborted" : REFUSALS.includes(error.status) ? "refused" : "error";
-    reply.errorMessage = error.message;
+    reply.end = chosen.signal.aborted ? "stopped" : REFUSALS.includes(error.status) ? "refused" : "failed";
+    reply.why = error.message;
   }
   return reply;
 }
@@ -167,40 +153,44 @@ const REFUSALS = [400, 413];
  * nothing answered is answered as not run, and an answer that says nothing says so. An answer a request was refused
  * with, one sent since the last reply, is the refusal, so no session holds one every request after is refused for.
  */
-function sendable(messages: Message[]): Message[] {
-  const sent: Message[] = [];
+function sendable(conversation: Said[]): Said[] {
+  const sent: Said[] = [];
   const unanswered = new Map<string, Call>();
   let since = 0; // where what was sent since the last reply begins
   const close = () => {
-    for (const call of unanswered.values()) sent.push(result(call, [{ type: "text", text: bee("not run") }], true));
+    for (const call of unanswered.values())
+      sent.push({ result: result(call, [{ type: "text", text: bee("not run") }], true) });
     unanswered.clear();
   };
-  for (const message of messages) {
-    if (message.role === "toolResult") {
-      const silent = message.content.every((block) => block.type === "text" && !block.text.trim());
-      const said: Result = silent ? { ...message, content: [{ type: "text", text: bee("no output") }] } : message;
-      if (unanswered.delete(message.toolCallId)) sent.push(said);
+  for (const said of conversation) {
+    if ("result" in said) {
+      const { result } = said;
+      const silent = result.content.every((block) => block.type === "text" && !block.text.trim());
+      const answer = silent
+        ? { result: { ...result, content: [{ type: "text" as const, text: bee("no output") }] } }
+        : said;
+      if (unanswered.delete(result.call)) sent.push(answer);
       continue;
     }
     close();
-    if (message.role === "assistant") {
-      if (message.stopReason === "refused")
-        for (let n = since; n < sent.length; n++) sent[n] = refused(sent[n], message.errorMessage!);
-      if (["error", "aborted", "refused"].includes(message.stopReason)) continue;
+    if ("reply" in said) {
+      const { reply } = said;
+      if (reply.end === "refused") for (let n = since; n < sent.length; n++) sent[n] = refused(sent[n], reply.why!);
+      if (["failed", "stopped", "refused"].includes(reply.end!)) continue;
       since = sent.length + 1;
-      for (const block of message.content) if (block.type === "toolCall") unanswered.set(block.id, block);
+      for (const block of reply.content) if (block.type === "call") unanswered.set(block.id, block);
     }
-    sent.push(message);
+    sent.push(said);
   }
   close();
   return sent;
 }
 
-/** A message as a request was refused with it: a tool's answer is the refusal. */
-const refused = (message: Message, why: string): Message =>
-  message.role === "toolResult"
-    ? { ...message, content: [{ type: "text", text: bee(`provider refused: ${why}`) }] }
-    : message;
+/** What was said, as a request was refused with it: what a command returned is the refusal. */
+const refused = (said: Said, why: string): Said =>
+  "result" in said
+    ? { result: { ...said.result, content: [{ type: "text", text: bee(`provider refused: ${why}`) }] } }
+    : said;
 
 /** The data of each event a server streams, as JSON. */
 async function* events(body: ReadableStream<Uint8Array>) {
@@ -223,10 +213,6 @@ async function* events(body: ReadableStream<Uint8Array>) {
 /** Whether a reply is of a model's provider, so its thinking and the ids it gave can be sent back to it. */
 const native = (reply: Reply, model: Model) => reply.provider === model.provider;
 
-/** What the user said, as blocks. */
-const blocks = (content: User["content"]): (Text | Image)[] =>
-  typeof content === "string" ? [{ type: "text", text: content }] : content;
-
 /** A tool's result as one text, if it is only text. */
 const textual = (content: Result["content"]) =>
   content.every((block): block is Text => block.type === "text")
@@ -236,12 +222,13 @@ const textual = (content: Result["content"]) =>
 /** A tool call's id as an API takes it: letters, digits, _ and -, at most 64. */
 const callId = (id: string) => id.replace(/[^\w-]/g, "_").slice(0, 64);
 
-const STOPS: Record<string, "stop" | "length" | "toolUse"> = {
-  end_turn: "stop",
-  pause_turn: "stop",
-  stop_sequence: "stop",
-  max_tokens: "length",
-  tool_use: "toolUse",
+/** How a reply ends, by Anthropic's reason: of itself, or cut at its longest. */
+const ENDS: Record<string, Reply["end"]> = {
+  end_turn: undefined,
+  pause_turn: undefined,
+  stop_sequence: undefined,
+  tool_use: undefined,
+  max_tokens: "cut",
 };
 
 /** Whether an Anthropic key is an OAuth token, which the API takes only from Claude Code. */
@@ -270,40 +257,40 @@ const anthropic: Api = {
       return { id, name, contextWindow, levels: LEVELS.filter(has), listed };
     }),
 
-  request(model, messages, { thinking, cache }) {
-    const [system, ...rest] = messages as [System, ...Said[]];
+  request(model, began, conversation, { thinking, cache }) {
     const mark =
       cache === "none" ? {} : { cache_control: { type: "ephemeral", ...(cache === "long" && { ttl: "1h" }) } };
     const media = (content: User["content"]) =>
-      blocks(content)
+      content
         .filter((block) => block.type === "image" || block.text.trim())
         .map((block) =>
           block.type === "image"
             ? { type: "image", source: { type: "base64", media_type: block.mimeType, data: block.data } }
             : { type: "text", text: block.text },
         );
-    const said = (block: Text | Thinking | Call, reply: Reply): object[] => {
-      if (block.type === "text") return block.text.trim() ? [{ type: "text", text: block.text }] : [];
-      if (block.type === "toolCall")
-        return [{ type: "tool_use", id: callId(block.id), name: block.name, input: block.arguments }];
-      if (!native(reply, model) || !block.thinkingSignature) return [];
-      return block.redacted
-        ? [{ type: "redacted_thinking", data: block.thinkingSignature }]
-        : [{ type: "thinking", thinking: block.thinking, signature: block.thinkingSignature }];
+    const block = (said: Text | Thinking | Call, reply: Reply): object[] => {
+      if (said.type === "text") return said.text.trim() ? [{ type: "text", text: said.text }] : [];
+      if (said.type === "call")
+        return [{ type: "tool_use", id: callId(said.id), name: said.name, input: said.arguments }];
+      if (!native(reply, model) || !said.sealed) return [];
+      return said.redacted
+        ? [{ type: "redacted_thinking", data: said.sealed }]
+        : [{ type: "thinking", thinking: said.text, signature: said.sealed }];
     };
-    const wire = (message: Said): { role: string; content: object[] } => {
-      if (message.role === "assistant")
-        return { role: "assistant", content: message.content.flatMap((block) => said(block, message)) };
-      if (message.role === "user") return { role: "user", content: media(message.content) };
-      const content = textual(message.content) ?? media(message.content);
+    const wire = (said: Said): { role: string; content: object[] } => {
+      if ("reply" in said)
+        return { role: "assistant", content: said.reply.content.flatMap((each) => block(each, said.reply)) };
+      if ("user" in said) return { role: "user", content: media(said.user.content) };
+      const { call, content, failed } = said.result;
+      const answer = textual(content) ?? media(content);
       return {
         role: "user",
-        content: [{ type: "tool_result", tool_use_id: callId(message.toolCallId), content, is_error: message.isError }],
+        content: [{ type: "tool_result", tool_use_id: callId(call), content: answer, is_error: failed }],
       };
     };
     // One message for each turn of who speaks, the last cached to its end.
     const dialogue: { role: string; content: object[] }[] = [];
-    for (const { role, content } of rest.map(wire).filter((message) => message.content.length)) {
+    for (const { role, content } of conversation.map(wire).filter((message) => message.content.length)) {
       if (dialogue.at(-1)?.role === role) dialogue.at(-1)!.content.push(...content);
       else dialogue.push({ role, content });
     }
@@ -320,8 +307,8 @@ const anthropic: Api = {
         model: model.id,
         max_tokens: model.listed.max_tokens,
         stream: true,
-        system: [...(oauth(model.apiKey) ? [identity] : []), { type: "text", text: system.content, ...mark }],
-        tools: system.toolsAdded.map(({ name, description, parameters }) => ({
+        system: [...(oauth(model.apiKey) ? [identity] : []), { type: "text", text: began.prompt, ...mark }],
+        tools: began.tools.map(({ name, description, parameters }) => ({
           name,
           description,
           input_schema: parameters,
@@ -341,16 +328,13 @@ const anthropic: Api = {
       counted.output = counts.output_tokens ?? counted.output;
       counted.cacheRead = counts.cache_read_input_tokens ?? counted.cacheRead;
       counted.cacheWrite = counts.cache_creation_input_tokens ?? counted.cacheWrite;
-      counted.totalTokens = counted.input + counted.output + counted.cacheRead + counted.cacheWrite;
     };
     /** A block as it starts, as bee keeps it. */
     const started = (block: any): Reply["content"][number] | undefined => {
       if (block.type === "text") return { type: "text", text: block.text };
-      if (block.type === "thinking")
-        return { type: "thinking", thinking: block.thinking, thinkingSignature: block.signature };
-      if (block.type === "redacted_thinking")
-        return { type: "thinking", thinking: "[Reasoning redacted]", thinkingSignature: block.data, redacted: true };
-      if (block.type === "tool_use") return { type: "toolCall", id: block.id, name: block.name, arguments: {} };
+      if (block.type === "thinking") return { type: "thinking", text: block.thinking, sealed: block.signature };
+      if (block.type === "redacted_thinking") return { type: "thinking", text: "", sealed: block.data, redacted: true };
+      if (block.type === "tool_use") return { type: "call", id: block.id, name: block.name, arguments: {} };
     };
     for await (const event of incoming) {
       const { delta } = event;
@@ -370,27 +354,26 @@ const anthropic: Api = {
         }
         case "content_block_delta":
           if (!under) break;
-          if (delta.type === "text_delta") under.block.text += delta.text;
-          if (delta.type === "thinking_delta") under.block.thinking += delta.thinking;
-          if (delta.type === "text_delta" || delta.type === "thinking_delta")
+          if (delta.type === "text_delta" || delta.type === "thinking_delta") {
+            under.block.text += delta.text ?? delta.thinking;
             tell(under.block.type, delta.text ?? delta.thinking);
-          if (delta.type === "signature_delta")
-            under.block.thinkingSignature = (under.block.thinkingSignature ?? "") + delta.signature;
+          }
+          if (delta.type === "signature_delta") under.block.sealed = (under.block.sealed ?? "") + delta.signature;
           if (delta.type === "input_json_delta") under.json += delta.partial_json;
           break;
         case "content_block_stop":
-          if (under?.block.type === "toolCall") under.block.arguments = JSON.parse(under.json || "{}");
+          if (under?.block.type === "call") under.block.arguments = JSON.parse(under.json || "{}");
           underway.delete(event.index);
           break;
         case "message_delta":
           stopped = delta;
           count(event.usage);
           break;
-        case "message_stop": {
-          const reason = STOPS[stopped.stop_reason!];
-          if (reason) return reason;
-          throw new Error(stopped.stop_details?.explanation ?? `The model stopped: ${stopped.stop_reason}`);
-        }
+        case "message_stop":
+          if (!(stopped.stop_reason! in ENDS))
+            throw new Error(stopped.stop_details?.explanation ?? `The model stopped: ${stopped.stop_reason}`);
+          reply.end = ENDS[stopped.stop_reason!];
+          return;
       }
     }
     throw new Error("The stream ended before the reply did");
@@ -430,42 +413,38 @@ const codex: Api = {
         return { id, name, contextWindow, levels: LEVELS.filter((level) => efforts.includes(level)), listed };
       }),
 
-  request(model, messages, { origin, thinking, cache }) {
-    const [system, ...rest] = messages as [System, ...Said[]];
+  request(model, began, conversation, { origin, thinking, cache }) {
     const media = (content: User["content"]) =>
-      blocks(content).map((block) =>
+      content.map((block) =>
         block.type === "text"
           ? { type: "input_text", text: block.text }
           : { type: "input_image", image_url: `data:${block.mimeType};base64,${block.data}` },
       );
-    const said = (block: Text | Thinking | Call, reply: Reply): object[] => {
-      const spoken = native(reply, model);
-      if (block.type === "thinking")
-        return spoken && block.thinkingSignature ? [JSON.parse(block.thinkingSignature)] : [];
-      if (block.type === "toolCall") {
-        const [call, item] = block.id.split("|");
-        const id = spoken && item?.startsWith("fc_") ? { id: item } : {};
+    const block = (said: Text | Thinking | Call, reply: Reply): object[] => {
+      const sealed = native(reply, model) && said.sealed;
+      if (said.type === "thinking") return sealed ? [sealed] : [];
+      if (said.type === "call") {
+        const { id, name, arguments: input } = said;
         return [
           {
             type: "function_call",
-            ...id,
-            call_id: callId(call),
-            name: block.name,
-            arguments: JSON.stringify(block.arguments),
+            ...(sealed && { id: sealed }),
+            call_id: callId(id),
+            name,
+            arguments: JSON.stringify(input),
           },
         ];
       }
-      if (!block.text.trim()) return [];
-      if (!spoken || !block.textSignature) return [{ role: "assistant", content: block.text }];
-      const { id, phase } = JSON.parse(block.textSignature);
-      const content = [{ type: "output_text", text: block.text, annotations: [] }];
-      return [{ type: "message", role: "assistant", content, status: "completed", id, phase }];
+      if (!said.text.trim()) return [];
+      if (!sealed) return [{ role: "assistant", content: said.text }];
+      const content = [{ type: "output_text", text: said.text, annotations: [] }];
+      return [{ type: "message", role: "assistant", content, status: "completed", ...sealed }];
     };
-    const wire = (message: Said): object[] => {
-      if (message.role === "assistant") return message.content.flatMap((block) => said(block, message));
-      if (message.role === "user") return [{ role: "user", content: media(message.content) }];
-      const output = textual(message.content) ?? media(message.content);
-      return [{ type: "function_call_output", call_id: callId(message.toolCallId.split("|")[0]), output }];
+    const wire = (said: Said): object[] => {
+      if ("reply" in said) return said.reply.content.flatMap((each) => block(each, said.reply));
+      if ("user" in said) return [{ role: "user", content: media(said.user.content) }];
+      const output = textual(said.result.content) ?? media(said.result.content);
+      return [{ type: "function_call_output", call_id: callId(said.result.call), output }];
     };
     return {
       url: `${model.baseUrl}/responses`,
@@ -480,9 +459,9 @@ const codex: Api = {
         model: model.id,
         store: false,
         stream: true,
-        instructions: system.content,
-        input: rest.flatMap(wire),
-        tools: system.toolsAdded.map(({ name, description, parameters }) => ({
+        instructions: began.prompt,
+        input: conversation.flatMap(wire),
+        tools: began.tools.map(({ name, description, parameters }) => ({
           type: "function",
           name,
           description,
@@ -499,24 +478,15 @@ const codex: Api = {
     /** An item as it is done, as bee keeps it. */
     const done = (item: any): Reply["content"][number] | undefined => {
       if (item.type === "reasoning")
-        return {
-          type: "thinking",
-          thinking: item.summary.map((part: any) => part.text).join("\n\n"),
-          thinkingSignature: JSON.stringify(item),
-        };
-      if (item.type === "message")
-        return {
-          type: "text",
-          text: item.content.map((part: any) => part.text ?? part.refusal).join(""),
-          textSignature: JSON.stringify({ v: 1, id: item.id, phase: item.phase ?? undefined }),
-        };
-      if (item.type === "function_call")
-        return {
-          type: "toolCall",
-          id: `${item.call_id}|${item.id}`,
-          name: item.name,
-          arguments: JSON.parse(item.arguments || "{}"),
-        };
+        return { type: "thinking", text: item.summary.map((part: any) => part.text).join("\n\n"), sealed: item };
+      if (item.type === "message") {
+        const text = item.content.map((part: any) => part.text ?? part.refusal).join("");
+        return { type: "text", text, sealed: { id: item.id, phase: item.phase ?? undefined } };
+      }
+      if (item.type === "function_call") {
+        const { call_id: id, name, arguments: input } = item;
+        return { type: "call", id, name, arguments: JSON.parse(input || "{}"), sealed: item.id };
+      }
     };
     for await (const event of incoming) {
       const { type, delta, item, response } = event;
@@ -530,16 +500,15 @@ const codex: Api = {
         if (block) reply.content.push(block);
       }
       if (type === "response.completed" || type === "response.incomplete") {
-        const { input_tokens, input_tokens_details: cached = {}, output_tokens, total_tokens } = response.usage;
+        const { input_tokens, input_tokens_details: cached = {}, output_tokens } = response.usage;
         const cacheRead = cached.cached_tokens ?? 0;
         const cacheWrite = cached.cache_write_tokens ?? 0;
-        const input = input_tokens - cacheRead - cacheWrite;
-        reply.usage = { input, output: output_tokens, cacheRead, cacheWrite, totalTokens: total_tokens };
-        if (type === "response.completed")
-          return reply.content.some((block) => block.type === "toolCall") ? "toolUse" : "stop";
+        reply.usage = { input: input_tokens - cacheRead - cacheWrite, output: output_tokens, cacheRead, cacheWrite };
+        if (type === "response.completed") return;
         const reason = response.incomplete_details?.reason;
-        if (reason === "max_output_tokens") return "length";
-        throw new Error(`The reply is incomplete: ${reason}`);
+        if (reason !== "max_output_tokens") throw new Error(`The reply is incomplete: ${reason}`);
+        reply.end = "cut";
+        return;
       }
     }
     throw new Error("The stream ended before the reply did");
@@ -600,17 +569,20 @@ function nearest(model: Model, level: Level) {
 }
 
 // ── Sessions ────────────────────────────────────────────────────────────────
-// A session is a file of lines, written as things happen: messages, and the settings chosen. Lines are only appended,
-// so every request begins with the last one, and the provider's cache of it holds. The first line is how the session
-// began: its directory, the prompt and the tool, and the settings in settings.json. The file is made when the first
-// thing is said in it. A reply that runs commands is written with what they returned, in one write, so nothing comes
+// A session is a file of lines, written as things happen, each one thing: how it began, something said, a setting
+// chosen, or the session it was forked from. Lines are only appended, so every request begins with the last one, and
+// the provider's cache of it holds. The first line is how the session began: its directory, the prompt and the tools,
+// with the settings in settings.json. The file is made when the first thing is said in it. A reply that runs commands is written with what they returned, in one write, so nothing comes
 // between a command and its output, from any editor. A fork is a session that begins as another did, up to where it
 // parts from it: its file begins with the other's lines up to there, then a line naming the session they are of, then
 // the settings chosen after there, so it is set as the other is.
 
 const SETTINGS = ["model", "thinking", "cache"] as const;
 type Settings = Partial<Record<(typeof SETTINGS)[number], string>>;
-type Line = Settings & { message?: Message; cwd?: string; forked?: string };
+type Line = Settings & { began?: Began; user?: User; reply?: Reply; result?: Result; forked?: string };
+
+/** Whether a line is something said. */
+const says = (line: Line): line is Line & Said => !!(line.user || line.reply || line.result);
 
 const SESSIONS = join(HOME, "sessions");
 const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
@@ -639,16 +611,15 @@ function instructions(cwd: string) {
 /** How a session begins. */
 const beginning = (cwd: string): Line => ({
   ...JSON.parse(read(join(HOME, "settings.json"), "{}")),
-  cwd,
-  message: {
-    role: "system",
-    content: `\nYou are an agent in the bee harness.\n\n${instructions(cwd)}`.trimEnd(),
-    toolsAdded: [BASH],
+  began: {
+    cwd,
+    prompt: `\nYou are an agent in the bee harness.\n\n${instructions(cwd)}`.trimEnd(),
+    tools: [BASH],
     timestamp: Date.now(),
   },
 });
 
-/** The lines of each session nothing has been said in yet, held until the first message writes them. */
+/** The lines of each session nothing has been said in yet, held until the first thing said writes them. */
 const unborn = new Map<string, Line[]>();
 
 /** A session's lines. One that is not JSON is empty. */
@@ -660,13 +631,13 @@ function lines(sid: string): Line[] {
 }
 
 /**
- * Add a line to a session, and describe it as the file now says. The first message makes the file, with the lines held
+ * Add a line to a session, and describe it as the file now says. The first thing said makes the file, with the lines held
  * before it, so no file is a session nothing was said in. Nothing else makes it, so a session deleted stays deleted: a
  * line written to a new file would be a session with no beginning, which no model will take and no one can list.
  */
 function append(sid: string, ...added: Line[]) {
   const held = unborn.get(sid);
-  if (held && !added.some((line) => line.message)) return void held.push(...added);
+  if (held && !added.some(says)) return void held.push(...added);
   let fd: number;
   try {
     fd = openSync(file(sid), held ? "wx" : constants.O_WRONLY | constants.O_APPEND);
@@ -682,12 +653,14 @@ function append(sid: string, ...added: Line[]) {
   describe(sid);
 }
 
-const cwdOf = (sid: string) => lines(sid)[0].cwd!;
+/** How a session began. */
+const beganOf = (sid: string) => lines(sid)[0].began!;
 
 /** How a session began, as a key: the same in each of its forks, as each begins with its first line. */
 const origin = (sid: string) => Bun.hash(JSON.stringify(lines(sid)[0])).toString(36);
 
-const conversation = (sid: string) => lines(sid).flatMap((line) => (line.message ? [line.message] : []));
+/** What was said in a session. */
+const conversation = (sid: string): Said[] => lines(sid).filter(says);
 
 /**
  * For each setting, the latest line that makes sense holds. Without one, the model is the first there is a key for,
@@ -711,8 +684,7 @@ function settings(sid: string) {
  */
 function fork(sid: string, cursorId?: string) {
   const all = lines(sid);
-  const at =
-    cursorId == null ? all.length : all.findIndex((line, n) => String(n) === cursorId && line.message?.role === "user");
+  const at = cursorId == null ? all.length : all.findIndex((line, n) => String(n) === cursorId && line.user);
   if (at < 0) throw failure(-32602, `No cursor ${cursorId}`);
   const forked = randomUUID();
   const chosen = all.slice(at).filter((line) => SETTINGS.some((setting) => setting in line));
@@ -726,7 +698,7 @@ function fork(sid: string, cursorId?: string) {
 async function ask(sid: string, signal: AbortSignal) {
   const { model, thinking, cache } = settings(sid);
   const tell: Tell = (type, words) => say(sid, type === "text" ? "agent_message" : "agent_thought", words);
-  return stream(model, conversation(sid), { origin: origin(sid), thinking, cache, signal }, tell);
+  return stream(model, beganOf(sid), conversation(sid), { origin: origin(sid), thinking, cache, signal }, tell);
 }
 
 /** A turn under way: how to stop it, what the user said that it has not read, and how it ends. */
@@ -735,10 +707,10 @@ const turns = new Map<string, Turn>();
 
 /** Write what the user said that the turn has not read, in order. An editor that reads cursors is told. */
 const hear = (sid: string, said: User[]) => {
-  for (const message of said.splice(0)) {
+  for (const told of said.splice(0)) {
     const at = lines(sid).length;
-    append(sid, { message });
-    if (cursors) quote(sid, message, at);
+    append(sid, { user: told });
+    if (cursors) quote(sid, told, at);
   }
 };
 
@@ -755,15 +727,14 @@ async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<str
       hear(sid, said);
       if (signal.aborted) return "cancelled";
       const reply = await ask(sid, signal);
-      const again = reply.stopReason === "refused" && results.length > 0;
-      const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
+      const again = reply.end === "refused" && results.length > 0;
+      const calls = reply.end ? [] : reply.content.filter((block) => block.type === "call");
       results = [];
       for (const call of calls) if (!signal.aborted) results.push(await run(sid, call, signal));
-      append(sid, ...[reply, ...results].map((message) => ({ message })));
+      append(sid, { reply }, ...results.map((result) => ({ result })));
       if (again) continue;
-      if (reply.stopReason === "error" || reply.stopReason === "refused") throw new Error(reply.errorMessage);
-      if (!calls.length && !said.length && !signal.aborted)
-        return reply.stopReason === "length" ? "max_tokens" : "end_turn";
+      if (reply.end === "failed" || reply.end === "refused") throw new Error(reply.why);
+      if (!calls.length && !said.length && !signal.aborted) return reply.end === "cut" ? "max_tokens" : "end_turn";
     }
   } finally {
     // However the turn ends, it is over first, so a write that fails cannot leave it under way for every prompt after
@@ -797,7 +768,7 @@ function head(text: string, path: string) {
  */
 async function bash(sid: string, call: Call, signal: AbortSignal) {
   const { command } = call.arguments;
-  const cwd = cwdOf(sid);
+  const { cwd } = beganOf(sid);
   if (call.name !== BASH.name) throw new Error("tool does not exist");
   if (typeof command !== "string") throw new Error("command is not a string");
   // Every command starts in the working directory, so with it gone none can, and the model is told so, not that there
@@ -861,9 +832,9 @@ let cursors = false;
  * Tell the editor something the user said, at line `at`, and, if it reads cursors, the cursor before it: a fork can
  * begin there. Such an editor is told what the user said as bee hears it, so it holds what each cursor is before.
  */
-function quote(sid: string, message: User, at: number) {
+function quote(sid: string, told: User, at: number) {
   const messageId = randomUUID();
-  say(sid, "user_message", plain(message.content), messageId);
+  say(sid, "user_message", plain(told.content), messageId);
   if (!cursors) return;
   const anchor = { type: "user_message", messageId, position: "before" };
   update(sid, { sessionUpdate: "cursor_update", cursorId: String(at), capabilities: { fork: {} }, anchor });
@@ -874,8 +845,8 @@ const headline = (text: string) => text.trim().split("\n")[0].slice(0, 80);
 
 /** What a session is called: the headline of the first thing the user said in it since it began, or was forked. */
 const title = (all: Line[]) => {
-  const since = all.slice(all.findLastIndex((line) => line.forked) + 1).flatMap((line) => line.message ?? []);
-  return headline(plain(since.find((message) => message.role === "user")?.content ?? "")) || undefined;
+  const first = all.slice(all.findLastIndex((line) => line.forked) + 1).find((line) => line.user)?.user;
+  return headline(plain(first?.content ?? [])) || undefined;
 };
 
 /**
@@ -883,19 +854,19 @@ const title = (all: Line[]) => {
  * is, as the last reply counted it. A reply that failed or was stopped first counted nothing.
  */
 function describe(sid: string) {
-  const messages = conversation(sid);
-  const called = title(lines(sid));
-  const counted = messages.findLast(
-    (message): message is Reply => message.role === "assistant" && message.usage.totalTokens > 0,
-  );
+  const all = lines(sid);
+  const called = title(all);
+  const used = all.map((line) => (line.reply ? counted(line.reply.usage) : 0)).findLast(Boolean);
   const size = settings(sid).model.contextWindow;
   if (called) update(sid, { sessionUpdate: "session_info_update", title: called });
-  if (counted) update(sid, { sessionUpdate: "usage_update", used: counted.usage.totalTokens, size });
+  if (used) update(sid, { sessionUpdate: "usage_update", used, size });
 }
 
-/** A message's content, as plain text. */
-const plain = (content: string | { type: string; text?: string }[]) =>
-  typeof content === "string" ? content : content.map((block) => block.text ?? "").join("");
+/** How many tokens a request was, and its reply. */
+const counted = ({ input, output, cacheRead, cacheWrite }: Usage) => input + output + cacheRead + cacheWrite;
+
+/** What was said, as plain text. */
+const plain = (content: { type: string; text?: string }[]) => content.map((block) => block.text ?? "").join("");
 
 /** A code block, fenced by more backticks than it holds. */
 function fenced(body: string, language = "") {
@@ -915,7 +886,7 @@ function showCall(sid: string, call: Call) {
 
 /** Show the editor a call as it ended: its command, and what it returned. */
 function showResult(sid: string, call: Call, answer: Result) {
-  const status = answer.isError ? "failed" : "completed";
+  const status = answer.failed ? "failed" : "completed";
   const output = answer.content.map((block) =>
     block.type === "image" ? { type: "content", content: block } : fenced(block.text),
   );
@@ -932,19 +903,17 @@ function showResult(sid: string, call: Call, answer: Result) {
 /** Show the editor a conversation it has not seen, as it was shown: a call with what it returned, as it was run. */
 function replay(sid: string) {
   const calls = new Map<string, Call>();
-  for (const [at, { message }] of lines(sid).entries()) {
-    if (!message) continue;
-    if (message.role === "user") quote(sid, message, at);
-    if (message.role === "toolResult") {
-      const call = calls.get(message.toolCallId)!;
+  for (const [at, { user, reply, result }] of lines(sid).entries()) {
+    if (user) quote(sid, user, at);
+    if (result) {
+      const call = calls.get(result.call)!;
       showCall(sid, call);
-      showResult(sid, call, message);
+      showResult(sid, call, result);
     }
-    if (message.role !== "assistant") continue;
-    for (const block of message.content) {
+    for (const block of reply?.content ?? []) {
       if (block.type === "text") say(sid, "agent_message", block.text);
-      if (block.type === "thinking") say(sid, "agent_thought", block.thinking);
-      if (block.type === "toolCall") calls.set(block.id, block);
+      if (block.type === "thinking") say(sid, "agent_thought", block.text);
+      if (block.type === "call") calls.set(block.id, block);
     }
   }
 }
@@ -967,7 +936,7 @@ function list(cwd?: string) {
     .map((sessionId) => {
       const all = lines(sessionId);
       const updatedAt = statSync(file(sessionId)).mtime.toISOString();
-      return { sessionId, cwd: all[0].cwd!, title: title(all), updatedAt };
+      return { sessionId, cwd: all[0].began!.cwd, title: title(all), updatedAt };
     })
     .filter((session) => !cwd || session.cwd === cwd)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -1030,11 +999,11 @@ const handlers: Record<string, (params: any) => unknown> = {
   },
   "session/cancel": ({ sessionId }) => turns.get(sessionId)?.abort.abort(),
   "session/prompt": async ({ sessionId, prompt }) => {
-    const message = user(parts(prompt));
+    const told = user(parts(prompt));
     let under = turns.get(sessionId);
-    if (under) under.said.push(message);
+    if (under) under.said.push(told);
     else {
-      under = { abort: new AbortController(), said: [message] };
+      under = { abort: new AbortController(), said: [told] };
       turns.set(sessionId, under);
       under.done = turn(sessionId, under);
     }
