@@ -306,6 +306,7 @@ let writing: { said: "thought" | "reply"; text: string; whole: boolean } | undef
 let usage = ""; // how full its context is
 let title = ""; // what the session is called
 let options: Option[] = []; // the session's settings
+let latest: { cursorId: string; text: string } | undefined; // what you said last, and the cursor before it
 let prompts = 0; // how many bee has not answered: a turn is under way while there are any
 let top: Place | undefined; // where the screen begins, once you have scrolled; else it follows the transcript
 let laid: Row[] = []; // the transcript as rows, as last drawn
@@ -315,7 +316,6 @@ let shown = 0; // how many are on screen
 const transcript: Entry[] = [];
 const ran = new Map<string, Call>(); // what bee ran, by the id of its call
 const quoted = new Map<string, string>(); // what you said in the session, by the id bee gave it
-const rewinds = new Map<string, string>(); // what you said that a fork can begin before, by the cursor there
 const unheard: string[] = []; // sent, and waiting for bee to hear it
 const queued: string[] = []; // waiting for the turn to end
 const history: string[] = []; // what you have said, here and in the sessions opened, for Up to recall
@@ -548,8 +548,7 @@ const updates: Record<string, (update: Update) => void> = {
     user(content.text);
   },
   cursor_update: ({ cursorId, anchor }) => {
-    rewinds.set(cursorId, quoted.get(anchor.messageId)!);
-    draw();
+    latest = { cursorId, text: quoted.get(anchor.messageId)! };
   },
   agent_thought_chunk: ({ content }) => stream("thought", content.text),
   agent_message_chunk: ({ content }) => stream("reply", content.text),
@@ -625,16 +624,27 @@ async function open(id?: string) {
   title = "";
   top = undefined;
   transcript.length = 0;
-  for (const each of [ran, quoted, rewinds]) each.clear();
+  latest = undefined;
+  for (const each of [ran, quoted]) each.clear();
   const opened = await call(id ? "session/load" : "session/new", { sessionId: id, cwd, mcpServers: [] });
   sessionId = id ?? opened.sessionId;
   options = opened.configOptions;
   others = (await sessions()).filter((session) => session.sessionId !== sessionId);
 }
 
-/** Fork the session, at the cursor before something said in it or else whole, and open the fork. */
-async function fork(cursorId?: string) {
-  await open((await call("session/fork", { sessionId, cursorId, cwd, mcpServers: [] })).sessionId);
+/**
+ * Go back to before what you said last: open a fork from there, with it back in the prompt. The session left stays as
+ * it was. Each waits for the one before, so pressed again, it goes further back.
+ */
+function rewind() {
+  const step = async () => {
+    if (!latest) return;
+    const { cursorId, text } = latest;
+    await open((await call("session/fork", { sessionId, cursorId, cwd, mcpServers: [] })).sessionId);
+    splice(0, typed.length, text);
+    draw();
+  };
+  last = last.then(step).catch((error) => note(error.message, red));
 }
 
 /** Send bee a prompt, and wait for its turn to end. One sent while a turn is under way joins it, once bee hears it. */
@@ -661,10 +671,10 @@ function queue(text: string, pick?: () => Promise<unknown>) {
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
-// `/model`, `/thinking`, `/session` and `/rewind` each take one of their values. The prompt is a command while it is
-// `/` and the start of a command's id, or a command's id and words; anything else, such as a path, is a prompt. The
-// values that fit the words are those of the best kind of fit there is: the value, the value after its provider, or a
-// part of it. What fits is shown under the prompt. Tab goes through it, and Enter sends the command once only one fits.
+// `/model`, `/thinking` and `/session` each take one of their values. The prompt is a command while it is `/` and the
+// start of a command's id, or a command's id and words; anything else, such as a path, is a prompt. The values that fit
+// the words are those of the best kind of fit there is: the value, the value after its provider, or a part of it. What
+// fits is shown under the prompt. Tab goes through it, and Enter sends the command once only one fits.
 
 /** A command: what it is set to, each of its values, and what picking it does. */
 type Command = { id: string; set: string; values: Map<string, () => Promise<unknown>> };
@@ -676,11 +686,7 @@ function named(values: [string, () => Promise<unknown>][]) {
   return map;
 }
 
-/**
- * Each command. A session is named by its title, so of those alike the latest; `new` is always a new one, and `fork`
- * one that begins as this one is. What you said is named by its first line, so of those alike the latest; rewinding to
- * it is a fork from before it, with it back in the prompt.
- */
+/** Each command. A session is named by its title, so of those alike the latest; and `new` is always a new one. */
 function commands(): Command[] {
   const settings = options.map((option) => ({
     id: option.id,
@@ -699,24 +705,10 @@ function commands(): Command[] {
     set: [usage, title && `"${title}"`, sessionId].filter(Boolean).join(" "),
     values: named([
       ["new", () => open()],
-      ["fork", () => fork()],
       ...others.map((other): [string, () => Promise<void>] => [other.title ?? "", () => open(other.sessionId)]),
     ]),
   };
-  const rewind = {
-    id: "rewind",
-    set: "",
-    values: named(
-      [...rewinds].reverse().map(([cursorId, text]): [string, () => Promise<void>] => [
-        text.trim().split("\n")[0],
-        async () => {
-          await fork(cursorId);
-          splice(0, typed.length, text);
-        },
-      ]),
-    ),
-  };
-  return [...settings, session, rewind];
+  return [...settings, session];
 }
 
 /** The kinds of fit a value can be for the words typed, best first. */
@@ -826,7 +818,7 @@ const keys: Record<string, () => unknown> = {
   "\x1b[C": () => move(cursor + 1), // Right
   "\x1b[A": () => recall(1), // Up
   "\x1b[B": () => recall(-1), // Down
-  "\x1b": () => busy() && stop(), // Esc
+  "\x1b": () => (busy() ? stop() : rewind()), // Esc: stops the turn, or else goes back
   "\x03": () => (typed ? splice(0, typed.length) : busy() ? stop() : quit()), // Ctrl-C: clears, else stops, else quits
 };
 
@@ -857,8 +849,8 @@ function press(data: string) {
 out.write("\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h");
 const fatal = (error: Error) => quit(1, error.message + "\n");
 await call("initialize", { protocolVersion: 1, clientCapabilities: { session: { cursors: {} } } }).catch(fatal);
-const latest = resume ? (await sessions().catch(fatal))[0] : undefined;
-await open(latest?.sessionId).catch(fatal);
+const continued = resume ? (await sessions().catch(fatal))[0] : undefined;
+await open(continued?.sessionId).catch(fatal);
 
 process.stdin.setRawMode(true).setEncoding("utf8").on("data", press);
 out.on("resize", draw);
