@@ -209,6 +209,11 @@ const user = (content: UserMessage["content"]): UserMessage => ({ role: "user", 
 type Turn = { abort: AbortController; said: UserMessage[]; done?: Promise<string> };
 const turns = new Map<string, Turn>();
 
+/** Write what the user said that the turn has not read, in the order it was said. */
+const hear = (sid: string, said: UserMessage[]) => {
+  for (const message of said.splice(0)) append(sid, { message });
+};
+
 /**
  * Read what the user said, ask, run what it asks for, and again until it has nothing to run and nothing more was
  * said. A prompt sent during a turn joins it, and the model reads it once the commands it is running end.
@@ -216,7 +221,7 @@ const turns = new Map<string, Turn>();
 async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<string> {
   try {
     for (;;) {
-      for (const message of said.splice(0)) append(sid, { message });
+      hear(sid, said);
       if (signal.aborted) return "cancelled";
       const reply = await ask(sid, signal);
       const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
@@ -227,7 +232,9 @@ async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<str
         return reply.stopReason === "length" ? "max_tokens" : "end_turn";
     }
   } finally {
-    turns.delete(sid); // in the same step as the last look at what was said, so nothing said is left behind
+    // However the turn ends, all that was said is written, in the same step as it is over, so none is left behind.
+    hear(sid, said);
+    turns.delete(sid);
   }
 }
 
