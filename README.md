@@ -62,11 +62,12 @@ transcript is left in the terminal as it was last shown.
 `/session` is `new` or the title of another session here, and `/fork` is something you said in this one. A value named
 whole, or without its provider, is the one meant, whatever its case. What fits is shown under the prompt as you type.
 Tab goes through it, and Enter sends the command once only one fits. Anything else that starts with `/`, such as a path,
-is a prompt. A command is not said in the session: it is shown dark, as what this terminal says, and Up does not recall
-it.
+is a prompt. A setting chosen is kept in the session, but the command is not something said in it: it is shown dark, as
+what this terminal says, and Up does not recall it.
 
-A fork begins as this session did before what you said, with it back in the prompt to say again. The session left stays
-as it was, so each branch is a session, called by what was first said in it, and the screen shows the one you are in.
+A fork begins as this session did before what you said, set as it is now, with what you said back in the prompt to say
+again. The session left stays as it was, so each branch is a session, called by what was first said in it, and the
+screen shows the one you are in.
 
 ## How it works
 
@@ -78,11 +79,12 @@ a turn in another editor on the same session.
 Closing the editor or the terminal stops a turn as Esc does, so what was said and run until then is written.
 
 **A fork is a session that begins as another did.** Its file begins with the other's lines, all of them or those before
-something the user said, then `{forked}`, naming the session they are of. Nothing is undone, and a fork needs nothing of
-the session it names: the branches of a conversation are sessions sharing their first lines, and the provider's cache of
-those holds in each. A fork is called by the first thing said in it, and like a new session, has no file until then. In
-ACP it is `session/fork`, at a cursor: bee gives one before each thing the user said, and tells an editor that reads
-cursors what the user said as it hears it, so the editor holds what each cursor is before.
+something the user said, then `{forked}`, naming the session they are of, then the settings chosen after those lines, so
+the fork is set as the session is. Nothing is undone, and a fork needs nothing of the session it names: the branches of
+a conversation are sessions sharing their first lines, and the provider's cache of those holds in each. A fork is called
+by the first thing said in it, and like a new session, has no file until then. In ACP it is `session/fork`, at a cursor:
+bee gives one before each thing the user said, and tells an editor that reads cursors what the user said as it hears it,
+so the editor holds what each cursor is before.
 
 **Every request is the file's messages.** So each begins as the last one did, and the provider's cache of it holds. The
 harness reads the file before every step and keeps no other state. For each setting, `{model}`, `{thinking}` or

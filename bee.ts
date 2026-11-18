@@ -585,9 +585,11 @@ function nearest(model: Model, level: Level) {
 // began: its directory, the prompt and the tool, and the settings in settings.json. The file is made when the first
 // thing is said in it. A reply that runs commands is written with what they returned, in one write, so nothing comes
 // between a command and its output, from any editor. A fork is a session that begins as another did, up to where it
-// parts from it: its file begins with the other's lines up to there, then a line naming the session they are of.
+// parts from it: its file begins with the other's lines up to there, then a line naming the session they are of, then
+// the settings chosen after there, so it is set as the other is.
 
-type Settings = { model?: string; thinking?: string; cache?: string };
+const SETTINGS = ["model", "thinking", "cache"] as const;
+type Settings = Partial<Record<(typeof SETTINGS)[number], string>>;
 type Line = Settings & { message?: Message; cwd?: string; forked?: string };
 
 const SESSIONS = join(HOME, "sessions");
@@ -679,9 +681,10 @@ function settings(sid: string) {
 }
 
 /**
- * Fork a session: a new one, with all its lines or those before a cursor. A cursor is the place of something the user
- * said: how many lines come before it. Lines are only appended, so a cursor never moves. Like a new session, a fork has
- * no file until something is said in it, so one nothing is said in leaves none.
+ * Fork a session: a new one, with all its lines or those before a cursor, then the settings chosen after it, so it is
+ * set as the session is. A cursor is the place of something the user said: how many lines come before it. Lines are
+ * only appended, so a cursor never moves. Like a new session, a fork has no file until something is said in it, so one
+ * nothing is said in leaves none.
  */
 function fork(sid: string, cursorId?: string) {
   const all = lines(sid);
@@ -689,7 +692,8 @@ function fork(sid: string, cursorId?: string) {
     cursorId == null ? all.length : all.findIndex((line, n) => String(n) === cursorId && line.message?.role === "user");
   if (at < 0) throw failure(-32602, `No cursor ${cursorId}`);
   const forked = randomUUID();
-  unborn.set(forked, [...all.slice(0, at), { forked: sid }]);
+  const chosen = all.slice(at).filter((line) => SETTINGS.some((setting) => setting in line));
+  unborn.set(forked, [...all.slice(0, at), { forked: sid }, ...chosen]);
   return forked;
 }
 

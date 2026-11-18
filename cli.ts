@@ -662,8 +662,9 @@ function queue(text: string, pick?: () => Promise<unknown>) {
 // `/model`, `/thinking`, `/session` and `/fork` each take one of their values. The prompt is a command while it is `/`
 // and the start of a command's id, or a command's id and words; anything else, such as a path, is a prompt. The values
 // that fit the words are those of the best kind of fit there is: the value, the value after its provider, or a part of
-// it. What fits is shown under the prompt. Tab goes through it, and Enter sends the command once only one fits. A
-// command is not said in the session, so it is shown as what this terminal says, and Up does not recall it.
+// it. What fits is shown under the prompt. Tab goes through it, and Enter sends the command once only one fits. The
+// session keeps a setting chosen, but a command is not said in it, so it is shown as what this terminal says, and Up
+// does not recall it.
 
 /** A command: what it is set to, each of its values, and what picking it does. */
 type Command = { id: string; set: string; values: Map<string, () => Promise<unknown>> };
