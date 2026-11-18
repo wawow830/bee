@@ -136,7 +136,9 @@ function paint({ text, each }: Marked, size: number) {
 /** Rows after `lead`: the first begins with it, and the rest under where the first's text begins. */
 const hang = (lead: string, rows: string[]) => rows.map((row, n) => (n ? " ".repeat(width(lead)) : lead) + row);
 
-/** A line of prose, in the `look` of what it is part of. A heading is bold, and a list item's rows hang under its text. */
+/**
+ * A line of prose, in the `look` of what it is part of. A heading is bold, and a list item's rows hang under its text.
+ */
 function prose(line: string, done: boolean, look: number) {
   const heading = line.match(/^#{1,6}\s+(.*)/);
   const [, indent = "", item = "", body = line] = heading ? [] : (line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)/) ?? []);
@@ -245,7 +247,7 @@ function code([, ...lines]: string[], look: number) {
 /** How each kind of block is shown. */
 const shows: Record<Kind, (lines: string[], done: boolean, look: number) => string[]> = {
   prose: ([line], done, look) => prose(line, done, look),
-  code: (lines, done, look) => code(lines, look),
+  code: (lines, _done, look) => code(lines, look),
   table,
 };
 

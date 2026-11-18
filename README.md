@@ -26,8 +26,8 @@ knows, such as `ANTHROPIC_API_KEY`, works too.
 The models are pi's: those pi.dev lists for each provider, over those pi-ai shipped with. bee starts with the lists it
 fetched last, in `~/.bee/agent/catalog`, and fetches them again without waiting, so a new model is there the next time.
 
-| Variable | Meaning |
-| --- | --- |
+| Variable   | Meaning                                               |
+| ---------- | ----------------------------------------------------- |
 | `BEE_HOME` | Where bee keeps its files. Without it, `~/.bee/agent` |
 
 Defaults go in `~/.bee/agent/settings.json`, and a session begins with them. Without it, the first model with a key,
