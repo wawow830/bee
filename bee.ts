@@ -589,12 +589,14 @@ const SESSIONS = join(HOME, "sessions");
 const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
 
 const SHOWN = 20_000; // characters of output the model sees per call
+const TIMEOUT = 2; // minutes a command runs before it is stopped
 
 const BASH = {
   name: "bash",
   description:
     "Every command starts in the working directory. " +
-    `Returns the output, cut at ${SHOWN.toLocaleString("en")} characters, or the image written.`,
+    `Returns the output, cut at ${SHOWN.toLocaleString("en")} characters, or the image written. ` +
+    `Timeout at ${TIMEOUT} minutes.`,
   parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
 };
 
@@ -781,8 +783,11 @@ async function bash(sid: string, call: Call, signal: AbortSignal) {
   const out = openSync(path, "w");
   // In its own process group, so an interrupt stops all of it.
   const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", out, out], detached: true });
+  // Stopped as the user stops it, at the timeout too.
+  const timeout = AbortSignal.timeout(TIMEOUT * 60_000);
+  const stop = AbortSignal.any([signal, timeout]);
   const interrupt = () => process.kill(-child.pid!, "SIGINT");
-  signal.addEventListener("abort", interrupt);
+  stop.addEventListener("abort", interrupt);
   let cut = false;
   try {
     const [status] = await once(child, "exit");
@@ -791,15 +796,18 @@ async function bash(sid: string, call: Call, signal: AbortSignal) {
     const format = isUtf8(written) ? "text" : Object.keys(IMAGES).find((type) => IMAGES[type].test(start));
     const text = written.toString("utf8").trimEnd();
     cut = format === "text" && text.length > SHOWN;
+    // What bee says of how the command ended is the last line of what it returned.
+    const ended = timeout.aborted ? bee("timeout") : "";
+    const told = (text: string) => ({ type: "text" as const, text: [text, ended].filter(Boolean).join("\n") });
     const content: Result["content"] =
       format === "text"
-        ? [{ type: "text", text: cut ? head(text, path) : text }]
+        ? [told(cut ? head(text, path) : text)]
         : format
-          ? [{ type: "image", data: written.toString("base64"), mimeType: format }]
-          : [{ type: "text", text: bee("output is of unsupported format") }];
+          ? [{ type: "image", data: written.toString("base64"), mimeType: format }, ...(ended ? [told("")] : [])]
+          : [told(bee("output is of unsupported format"))];
     return { content, failed: status !== 0 || !format };
   } finally {
-    signal.removeEventListener("abort", interrupt);
+    stop.removeEventListener("abort", interrupt);
     closeSync(out);
     if (!cut) rmSync(path);
   }
