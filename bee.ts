@@ -807,10 +807,13 @@ const update = (sessionId: string, fields: object) =>
 const say = (sid: string, who: "user_message" | "agent_message" | "agent_thought", words: string) =>
   words && update(sid, { sessionUpdate: `${who}_chunk`, content: { type: "text", text: words } });
 
-/** What a conversation is called: the start of the first line the user said in it. */
+/** What a text is called: the start of its first line. */
+const headline = (text: string) => text.trim().split("\n")[0].slice(0, 80);
+
+/** What a conversation is called: the headline of the first thing the user said in it. */
 const title = (messages: Message[]) => {
   const first = messages.find((message) => message.role === "user")?.content ?? "";
-  return plain(first).trim().split("\n")[0].slice(0, 80) || undefined;
+  return headline(plain(first)) || undefined;
 };
 
 /**
@@ -838,14 +841,17 @@ function fenced(body: string, language = "") {
   return { type: "content", content: { type: "text", text: `${fence}${language}\n${body.trim()}\n${fence}` } };
 }
 
+/** The command a call asks for, as text. */
 const command = (call: Call) => String(call.arguments.command ?? "");
 
+/** Show the editor a call as it starts: its command, called by its headline. */
 function showCall(sid: string, call: Call) {
-  const shown = { toolCallId: call.id, title: command(call).trim().split("\n")[0].slice(0, 80), kind: "execute" };
+  const shown = { toolCallId: call.id, title: headline(command(call)), kind: "execute" };
   const content = [fenced(command(call), "bash")];
   update(sid, { sessionUpdate: "tool_call", ...shown, status: "in_progress", content, rawInput: call.arguments });
 }
 
+/** Show the editor a call as it ended: its command, and what it returned. */
 function showResult(sid: string, call: Call, answer: Result) {
   const status = answer.isError ? "failed" : "completed";
   const output = answer.content.map((block) =>
