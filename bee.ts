@@ -105,8 +105,7 @@ const BASH = {
   name: "bash",
   description:
     "Every command starts in the working directory. " +
-    `Returns the output, cut at ${SHOWN.toLocaleString("en")} characters, ` +
-    `or the image written, up to ${SEEN.toLocaleString("en")} bytes.`,
+    `Returns the output, cut at ${SHOWN.toLocaleString("en")} characters, or the image written.`,
   parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
 };
 

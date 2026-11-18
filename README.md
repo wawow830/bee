@@ -77,9 +77,9 @@ harness reads the file before every step and keeps no other state. For each sett
 `{cache}`, the latest line holds.
 
 **One tool.** `bash`: "Every command starts in the working directory. Returns the output, cut at 12,000 characters, or
-the image written, up to 3,932,160 bytes." One that ends elsewhere is told "Shell cwd was reset to <it>", as Claude Code
-tells it. A larger image, from a command or the editor, is kept as its size, so no request fails on it. The computer is
-what lasts: files, and whatever a command left running.
+the image written." One that ends elsewhere is told "Shell cwd was reset to <it>", as Claude Code tells it. An image too
+large, from a command or the editor, is kept as its size, so no request fails on it. The computer is what lasts: files,
+and whatever a command left running.
 
 **The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model what
 to do. Instructions are yours, in `AGENTS.md`, from `~/.bee/agent` and every directory from the root down to the working
