@@ -71,6 +71,13 @@ commands is written once they end, with what they returned, so nothing comes bet
 a turn in another editor on the same session.
 Closing the editor or the terminal stops a turn as Esc does, so what was said and run until then is written.
 
+**A fork is a session that begins as another did.** Its file begins with the other's lines, up to before something the
+user said or all of them, then `{forked}`, the session they are of. Nothing is undone, and a fork needs nothing of the
+session it names: the branches of a conversation are sessions sharing their first lines, and the provider's cache of
+them holds in each. A fork is called by the first thing said in it once forked, and as a new session, it has no file
+until something is said in it. In ACP it is `session/fork`, at a cursor before something said: bee gives one with each,
+as it tells an editor that reads cursors what was said as it hears it.
+
 **Every request is the file's messages.** So each begins as the last one did, and the provider's cache of it holds. The
 harness reads the file before every step and keeps no other state. For each setting, `{model}`, `{thinking}` or
 `{cache}`, the latest line holds.

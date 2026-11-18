@@ -584,10 +584,11 @@ function nearest(model: Model, level: Level) {
 // so every request begins with the last one, and the provider's cache of it holds. The first line is how the session
 // began: its directory, the prompt and the tool, and the settings in settings.json. The file is made when the first
 // thing is said in it. A reply that runs commands is written with what they returned, in one write, so nothing comes
-// between a command and its output, from any editor.
+// between a command and its output, from any editor. A fork is a session that begins as another did, up to where it
+// parts from it: its file begins with the other's lines up to there, then a line naming the session they are of.
 
 type Settings = { model?: string; thinking?: string; cache?: string };
-type Line = Settings & { message?: Message; cwd?: string };
+type Line = Settings & { message?: Message; cwd?: string; forked?: string };
 
 const SESSIONS = join(HOME, "sessions");
 const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
@@ -677,6 +678,21 @@ function settings(sid: string) {
   return { model, thinking: nearest(model, level), cache };
 }
 
+/**
+ * Fork a session: a new one, with its lines up to the cursor, or all of them. A cursor is where something the user said
+ * is, the number of lines before it; lines are only appended, so a cursor never moves. The fork is unborn until
+ * something is said in it, as a new session is, so a fork nothing is said in leaves no file.
+ */
+function fork(sid: string, cursorId?: string) {
+  const all = lines(sid);
+  const at =
+    cursorId == null ? all.length : all.findIndex((line, n) => String(n) === cursorId && line.message?.role === "user");
+  if (at < 0) throw failure(-32602, `No cursor ${cursorId}`);
+  const forked = randomUUID();
+  unborn.set(forked, [...all.slice(0, at), { forked: sid }]);
+  return forked;
+}
+
 // ── The turn ────────────────────────────────────────────────────────────────
 
 /** One reply from the model, streamed to the editor. */
@@ -692,7 +708,11 @@ const turns = new Map<string, Turn>();
 
 /** Write what the user said that the turn has not read, in the order it was said. */
 const hear = (sid: string, said: User[]) => {
-  for (const message of said.splice(0)) append(sid, { message });
+  for (const message of said.splice(0)) {
+    const at = lines(sid).length;
+    append(sid, { message });
+    if (editor.session?.cursors) quote(sid, message, at);
+  }
 };
 
 /**
@@ -804,16 +824,31 @@ const send = (message: object) => process.stdout.write(JSON.stringify({ jsonrpc:
 const update = (sessionId: string, fields: object) =>
   send({ method: "session/update", params: { sessionId, update: fields } });
 
-const say = (sid: string, who: "user_message" | "agent_message" | "agent_thought", words: string) =>
-  words && update(sid, { sessionUpdate: `${who}_chunk`, content: { type: "text", text: words } });
+const say = (sid: string, who: "user_message" | "agent_message" | "agent_thought", words: string, messageId?: string) =>
+  words && update(sid, { sessionUpdate: `${who}_chunk`, messageId, content: { type: "text", text: words } });
+
+/** What the editor can read, as it said when it began. */
+let editor: { session?: { cursors?: object } } = {};
+
+/**
+ * Tell the editor something the user said, at line `at`, and, if it reads cursors, that a fork can begin before it. An
+ * editor that reads cursors is told what the user said as bee hears it, so each has one before something it holds.
+ */
+function quote(sid: string, message: User, at: number) {
+  const messageId = randomUUID();
+  say(sid, "user_message", plain(message.content), messageId);
+  if (!editor.session?.cursors) return;
+  const anchor = { type: "user_message", messageId, position: "before" };
+  update(sid, { sessionUpdate: "cursor_update", cursorId: String(at), capabilities: { fork: {} }, anchor });
+}
 
 /** What a text is called: the start of its first line. */
 const headline = (text: string) => text.trim().split("\n")[0].slice(0, 80);
 
-/** What a conversation is called: the headline of the first thing the user said in it. */
-const title = (messages: Message[]) => {
-  const first = messages.find((message) => message.role === "user")?.content ?? "";
-  return headline(plain(first)) || undefined;
+/** What a session is called: the headline of the first thing the user said in it since it began, or was forked. */
+const title = (all: Line[]) => {
+  const since = all.slice(all.findLastIndex((line) => line.forked) + 1).flatMap((line) => line.message ?? []);
+  return headline(plain(since.find((message) => message.role === "user")?.content ?? "")) || undefined;
 };
 
 /**
@@ -822,7 +857,7 @@ const title = (messages: Message[]) => {
  */
 function describe(sid: string) {
   const messages = conversation(sid);
-  const called = title(messages);
+  const called = title(lines(sid));
   const counted = messages.findLast(
     (message): message is Reply => message.role === "assistant" && message.usage.totalTokens > 0,
   );
@@ -870,8 +905,9 @@ function showResult(sid: string, call: Call, answer: Result) {
 /** Show the editor a conversation it has not seen, as it was shown: a call with what it returned, as it was run. */
 function replay(sid: string) {
   const calls = new Map<string, Call>();
-  for (const message of conversation(sid)) {
-    if (message.role === "user") say(sid, "user_message", plain(message.content));
+  for (const [at, { message }] of lines(sid).entries()) {
+    if (!message) continue;
+    if (message.role === "user") quote(sid, message, at);
     if (message.role === "toolResult") {
       const call = calls.get(message.toolCallId)!;
       showCall(sid, call);
@@ -903,7 +939,7 @@ function list(cwd?: string) {
     .flatMap((name) => /^([\w-]+)\.jsonl$/.exec(name)?.[1] ?? [])
     .map((sessionId) => {
       const updatedAt = statSync(file(sessionId)).mtime.toISOString();
-      return { sessionId, cwd: cwdOf(sessionId), title: title(conversation(sessionId)), updatedAt };
+      return { sessionId, cwd: cwdOf(sessionId), title: title(lines(sessionId)), updatedAt };
     })
     .filter((session) => !cwd || session.cwd === cwd)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -933,16 +969,19 @@ function open(sessionId: string) {
 }
 
 const handlers: Record<string, (params: any) => unknown> = {
-  initialize: () => ({
-    protocolVersion: 1,
-    agentInfo: { name: "bee", title: "bee", version },
-    authMethods: [],
-    agentCapabilities: {
-      loadSession: true,
-      promptCapabilities: { image: true, embeddedContext: true },
-      sessionCapabilities: { list: {}, resume: {} },
-    },
-  }),
+  initialize: ({ clientCapabilities }) => {
+    editor = clientCapabilities ?? {};
+    return {
+      protocolVersion: 1,
+      agentInfo: { name: "bee", title: "bee", version },
+      authMethods: [],
+      agentCapabilities: {
+        loadSession: true,
+        promptCapabilities: { image: true, embeddedContext: true },
+        sessionCapabilities: { list: {}, resume: {}, fork: {} },
+      },
+    };
+  },
   "session/new": ({ cwd }) => {
     const sessionId = randomUUID();
     unborn.set(sessionId, [beginning(cwd)]);
@@ -953,6 +992,7 @@ const handlers: Record<string, (params: any) => unknown> = {
     replay(sessionId);
     return open(sessionId);
   },
+  "session/fork": ({ sessionId, cursorId }) => open(fork(sessionId, cursorId)),
   "session/list": ({ cwd }) => ({ sessions: list(cwd) }),
   "session/set_config_option": ({ sessionId, configId, value }) => {
     const choices = options(sessionId).find((option) => option.id === configId)?.options ?? [];
