@@ -645,8 +645,8 @@ function lines(sid: string): Line[] {
 
 /**
  * Add a line to a session. The first message makes the file, with the lines held before it, and names the session, so
- * no file is a session nothing was said in. Nothing else makes it, so a session deleted stays deleted: a line written to a new file would
- * be a session with no beginning, which no model will take and no one can list.
+ * no file is a session nothing was said in. Nothing else makes it, so a session deleted stays deleted: a line written
+ * to a new file would be a session with no beginning, which no model will take and no one can list.
  */
 function append(sid: string, ...added: Line[]) {
   const held = unborn.get(sid);
