@@ -585,13 +585,11 @@ function nearest(model: Model, level: Level) {
 }
 
 // ── Sessions ────────────────────────────────────────────────────────────────
-// A session is a file of lines, written as things happen: messages, and the
-// settings chosen. Lines are only appended, so every request begins with the
-// last one, and the provider's cache of it holds. The first line is how the
-// session began: its directory, the prompt and the tool, and the settings in
-// settings.json. The file is made when the first thing is said in it. A reply
-// that runs commands is written with what they returned, in one write, so
-// nothing comes between a command and its output, from any editor.
+// A session is a file of lines, written as things happen: messages, and the settings chosen. Lines are only appended,
+// so every request begins with the last one, and the provider's cache of it holds. The first line is how the session
+// began: its directory, the prompt and the tool, and the settings in settings.json. The file is made when the first
+// thing is said in it. A reply that runs commands is written with what they returned, in one write, so nothing comes
+// between a command and its output, from any editor.
 
 type Settings = { model?: string; thinking?: string; cache?: string };
 type Line = Settings & { message?: Message; cwd?: string };
