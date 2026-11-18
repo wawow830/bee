@@ -49,8 +49,9 @@ bee "…"        # start with a prompt
 
 Enter sends. While bee works, Enter steers: bee reads what you said once the commands it is running end, in the same
 turn, and until then it waits under the transcript. Alt-Enter queues it for when the turn is over. Ctrl-J is a new line.
-Up and Down recall what you said in the session, Esc stops a turn, and pressed twice with nothing typed, begins `/fork`.
-Ctrl-C clears, stops or quits. Ctrl-A, Ctrl-E, Ctrl-W and Ctrl-U edit as in a shell. Ctrl-V pastes an image copied.
+Up and Down recall what you said in the session, and below it what you were typing. Esc stops a turn, and pressed twice
+with nothing typed, begins `/fork`. Ctrl-C clears, stops or quits. Ctrl-A, Ctrl-E, Ctrl-W and Ctrl-U edit as in a
+shell. Ctrl-V pastes an image copied.
 
 While bee works, its work is shown: what it thinks and runs, each thing as one row, and clicking it shows all of it.
 The answer is shown whole as it comes. Once the turn is over, ended or stopped, the work folds away behind what you

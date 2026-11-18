@@ -746,6 +746,7 @@ function read(text: string): { fits: string[]; of?: string; pick?: () => Promise
 // ── Keyboard ────────────────────────────────────────────────────────────────
 
 let back = 0; // how many prompts Up has gone back
+let draft = ""; // what was typed when Up first went back
 let pasting = false; // between the marks a terminal puts around a paste
 let escaped = 0; // when Esc was last pressed with nothing typed and no turn to stop
 
@@ -758,10 +759,11 @@ function splice(from: number, to: number, text = "") {
 /** Put the cursor at `to`, or as near as the prompt allows. */
 const move = (to: number) => (cursor = Math.max(0, Math.min(typed.length, to)));
 
-/** Put a prompt you said in the prompt, `step` further back. */
+/** Put a prompt you said in the prompt, `step` further back. Before all you said comes what you are typing. */
 function recall(step: number) {
+  if (!back) draft = typed;
   back = Math.max(0, Math.min(history.length, back + step));
-  splice(0, typed.length, back ? history.at(-back) : "");
+  splice(0, typed.length, [...history, draft].at(-1 - back));
 }
 
 /** Take the first of what fits, or at the next Tab the one after. */
