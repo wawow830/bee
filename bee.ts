@@ -843,20 +843,21 @@ function showResult(sid: string, call: Call, answer: Result) {
   });
 }
 
-/** Show the editor a conversation it has not seen. */
+/** Show the editor a conversation it has not seen, as it was shown: a call with what it returned, as it was run. */
 function replay(sid: string) {
   const calls = new Map<string, Call>();
   for (const message of conversation(sid)) {
     if (message.role === "user") say(sid, "user_message", plain(message.content));
-    if (message.role === "toolResult") showResult(sid, calls.get(message.toolCallId)!, message);
+    if (message.role === "toolResult") {
+      const call = calls.get(message.toolCallId)!;
+      showCall(sid, call);
+      showResult(sid, call, message);
+    }
     if (message.role !== "assistant") continue;
     for (const block of message.content) {
       if (block.type === "text") say(sid, "agent_message", block.text);
       if (block.type === "thinking") say(sid, "agent_thought", block.thinking);
-      if (block.type === "toolCall") {
-        calls.set(block.id, block);
-        showCall(sid, block);
-      }
+      if (block.type === "toolCall") calls.set(block.id, block);
     }
   }
 }
