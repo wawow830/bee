@@ -78,11 +78,6 @@ type Message = System | User | Reply | Result;
 /** What bee says in a tool's answer, set apart from all a command wrote. */
 const bee = (words: string) => `(bee: ${words})`;
 
-/** What stands where a tool said nothing, where a call was not run, and where it wrote what a model cannot read. */
-const SILENT = bee("no output");
-const UNRUN = bee("not run");
-const UNSUPPORTED = bee("output is of unsupported format");
-
 const user = (content: User["content"]): User => ({ role: "user", content, timestamp: Date.now() });
 const result = (call: Call, content: Result["content"], isError: boolean): Result => ({
   role: "toolResult",
@@ -176,13 +171,13 @@ function sendable(messages: Message[]): Message[] {
   const unanswered = new Map<string, Call>();
   let since = 0; // where what was sent since the last reply begins
   const close = () => {
-    for (const call of unanswered.values()) sent.push(result(call, [{ type: "text", text: UNRUN }], true));
+    for (const call of unanswered.values()) sent.push(result(call, [{ type: "text", text: bee("not run") }], true));
     unanswered.clear();
   };
   for (const message of messages) {
     if (message.role === "toolResult") {
       const silent = message.content.every((block) => block.type === "text" && !block.text.trim());
-      const said: Result = silent ? { ...message, content: [{ type: "text", text: SILENT }] } : message;
+      const said: Result = silent ? { ...message, content: [{ type: "text", text: bee("no output") }] } : message;
       if (unanswered.delete(message.toolCallId)) sent.push(said);
       continue;
     }
@@ -772,10 +767,10 @@ async function bash(sid: string, command: string, signal: AbortSignal) {
     cut = format === "text" && text.length > SHOWN;
     const content: Result["content"] =
       format === "text"
-        ? [{ type: "text", text: cut ? head(text, path) : text || SILENT }]
+        ? [{ type: "text", text: cut ? head(text, path) : text }]
         : format
           ? [{ type: "image", data: written.toString("base64"), mimeType: format }]
-          : [{ type: "text", text: UNSUPPORTED }];
+          : [{ type: "text", text: bee("output is of unsupported format") }];
     return { content, failed: status !== 0 || !format };
   } finally {
     signal.removeEventListener("abort", interrupt);
