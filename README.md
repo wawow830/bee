@@ -53,8 +53,6 @@ Enter sends. While bee works, Enter steers: bee reads what you said once the com
 turn. Alt-Enter queues it for when the turn is over. Ctrl-J is a new line. Up and Down recall what you said in the
 session, Esc stops a turn, Ctrl-C clears, stops or quits. Ctrl-A, Ctrl-E, Ctrl-W and Ctrl-U edit as in a shell.
 
-To show bee an image, give its path or drag the file in. For one you copied, say it is in the clipboard.
-
 While bee works, its work is shown: what it thinks and runs, each thing as one row, and clicking it shows all of it.
 The answer is shown whole as it comes. Once the turn is over, ended or stopped, the work folds away behind what you
 said, and clicking what you said or the answer unfolds it. The wheel scrolls, and Shift-drag selects. On quitting, the
@@ -77,9 +75,8 @@ harness reads the file before every step and keeps no other state. For each sett
 `{cache}`, the latest line holds.
 
 **One tool.** `bash`: "Every command starts in the working directory. Returns the output, cut at 12,000 characters, or
-the image written." One that ends elsewhere is told "Shell cwd was reset to <it>", as Claude Code tells it. An image too
-large, from a command or the editor, is kept as its size, so no request fails on it. The computer is what lasts: files,
-and whatever a command left running.
+the image written." One that ends elsewhere is told "Shell cwd was reset to <it>", as Claude Code tells it. The computer
+is what lasts: files, and whatever a command left running.
 
 **The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model what
 to do. Instructions are yours, in `AGENTS.md`, from `~/.bee/agent` and every directory from the root down to the working
