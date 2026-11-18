@@ -75,7 +75,7 @@ Closing the editor or the terminal stops a turn as Esc does, so what was said an
 harness reads the file before every step and keeps no other state. For each setting, `{model}`, `{thinking}` or
 `{cache}`, the latest line holds.
 
-**One tool.** `bash`: "Every command starts in the working directory. Returns the output, cut at 12,000 characters, or
+**One tool.** `bash`: "Every command starts in the working directory. Returns the output, cut at 8,000 characters, or
 the image written." Output that is neither fails. One that ends elsewhere is told "Shell cwd was reset to <it>", as
 Claude Code tells it, and with the working directory gone, every one is told it does not exist. The computer is what
 lasts: files, and whatever a command left running.
