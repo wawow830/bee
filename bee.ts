@@ -88,7 +88,9 @@ for (const provider of providers) fetchCatalog(provider).catch(() => {});
 // settings chosen. Lines are only appended, so every request begins with the
 // last one, and the provider's cache of it holds. The first line is how the
 // session began: its directory, the prompt and the tool, and the settings in
-// settings.json. The file is made when the first thing is said in it.
+// settings.json. The file is made when the first thing is said in it. A reply
+// that runs commands is written with what they returned, in one write, so
+// nothing comes between a command and its output, from any editor.
 
 type Settings = { model?: string; thinking?: string; cache?: string };
 type Line = Settings & { message?: Message; cwd?: string };
@@ -153,9 +155,9 @@ function lines(sid: string): Line[] {
  * nothing was said in. Nothing else makes it, so a session deleted stays deleted: a line written to a new file would
  * be a session with no beginning, which no model will take and no one can list.
  */
-function append(sid: string, line: Line) {
+function append(sid: string, ...added: Line[]) {
   const held = unborn.get(sid);
-  if (held && !line.message) return void held.push(line);
+  if (held && !added.some((line) => line.message)) return void held.push(...added);
   let fd: number;
   try {
     fd = openSync(file(sid), held ? "wx" : constants.O_WRONLY | constants.O_APPEND);
@@ -163,7 +165,7 @@ function append(sid: string, line: Line) {
     throw error.code === "ENOENT" ? failure(-32002, `No session ${sid}`) : error;
   }
   try {
-    writeSync(fd, [...(held ?? []), line].map((one) => JSON.stringify(one) + "\n").join(""));
+    writeSync(fd, [...(held ?? []), ...added].map((line) => JSON.stringify(line) + "\n").join(""));
     unborn.delete(sid);
   } finally {
     closeSync(fd);
@@ -226,7 +228,8 @@ const hear = (sid: string, said: UserMessage[]) => {
 
 /**
  * Read what the user said, ask, run what it asks for, and again until it has nothing to run and nothing more was
- * said. A prompt sent during a turn joins it, and the model reads it once the commands it is running end.
+ * said. A prompt sent during a turn joins it, and the model reads it once the commands it is running end. A reply is
+ * written once its commands end, with what they returned.
  */
 async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<string> {
   try {
@@ -235,8 +238,9 @@ async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<str
       if (signal.aborted) return "cancelled";
       const reply = await ask(sid, signal);
       const calls = reply.stopReason === "toolUse" ? reply.content.filter((block) => block.type === "toolCall") : [];
-      append(sid, { message: reply });
-      for (const call of calls) if (!signal.aborted) append(sid, { message: await run(sid, call, signal) });
+      const results = [];
+      for (const call of calls) if (!signal.aborted) results.push(await run(sid, call, signal));
+      append(sid, ...[reply, ...results].map((message) => ({ message })));
       if (reply.stopReason === "error") throw new Error(reply.errorMessage);
       if (!calls.length && !said.length && !signal.aborted)
         return reply.stopReason === "length" ? "max_tokens" : "end_turn";
