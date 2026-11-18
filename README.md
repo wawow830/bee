@@ -51,7 +51,8 @@ bee "…"        # start with a prompt
 
 Enter sends. While bee works, Enter steers: bee reads what you said once the commands it is running end, in the same
 turn. Alt-Enter queues it for when the turn is over. Ctrl-J is a new line. Up and Down recall what you said in the
-session, Esc stops a turn, Ctrl-C clears, stops or quits. Ctrl-A, Ctrl-E, Ctrl-W and Ctrl-U edit as in a shell.
+session, Esc stops a turn, Ctrl-C clears, stops or quits. Ctrl-A, Ctrl-E, Ctrl-W and Ctrl-U edit as in a shell. Ctrl-V
+pastes an image copied.
 
 While bee works, its work is shown: what it thinks and runs, each thing as one row, and clicking it shows all of it.
 The answer is shown whole as it comes. Once the turn is over, ended or stopped, the work folds away behind what you
@@ -74,9 +75,14 @@ Closing the editor or the terminal stops a turn as Esc does, so what was said an
 harness reads the file before every step and keeps no other state. For each setting, `{model}`, `{thinking}` or
 `{cache}`, the latest line holds.
 
-**One tool.** `bash`: "Every command starts in the working directory. Returns the output, cut at 12,000 characters, or
-the image written." One that ends elsewhere is told "Shell cwd was reset to <it>", as Claude Code tells it. The computer
-is what lasts: files, and whatever a command left running.
+**One tool.** `bash`: "Every command starts in the working directory. Returns the output: its text, cut at 12,000
+characters, and its images." One that ends elsewhere is told "Shell cwd was reset to <it>", as Claude Code tells it. The
+computer is what lasts: files, and whatever a command left running.
+
+**An image is a file.** One pasted, in the editor or with Ctrl-V, is written to a file, and its path is what you said;
+the model sees it by writing it, as with `cat`. An image anywhere in what a command writes is taken out of its text, and
+shown as a model would see it: 1,568 pixels long at most, in its format, or JPEG if that is more than 5 MiB in base64.
+So the session holds no image a provider refuses, and one that cannot be read stays text.
 
 **The harness states facts and gives no instructions.** It does not watch the context, summarise, or tell the model what
 to do. Instructions are yours, in `AGENTS.md`, from `~/.bee/agent` and every directory from the root down to the working

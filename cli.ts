@@ -1,6 +1,9 @@
 #!/usr/bin/env bun
 // bee in a terminal. It runs bee.ts and talks to it over ACP, as an editor would.
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -742,6 +745,24 @@ function enter(wait = false) {
   prompt(text).catch((error) => note(error.message, red));
 }
 
+/** The commands that write an image copied, on Wayland and on X. */
+const CLIPBOARDS = [
+  ["wl-paste", "--type", "image/png"],
+  ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
+];
+
+/** Write the image copied to a file, and put its path in the prompt, as bee does with one an editor sends. */
+function paste() {
+  for (const [command, ...args] of CLIPBOARDS) {
+    const { status, stdout } = spawnSync(command, args);
+    if (status !== 0 || !stdout.length) continue;
+    const path = join(tmpdir(), `bee-${randomUUID()}.png`);
+    writeFileSync(path, stdout);
+    return splice(cursor, cursor, (/\S$/.test(typed.slice(0, cursor)) ? " " : "") + path);
+  }
+  note("No image is copied.");
+}
+
 const keys: Record<string, () => unknown> = {
   "\r": () => enter(), // Enter
   "\x1b\r": () => enter(true), // Alt-Enter: for when the turn is over
@@ -751,6 +772,7 @@ const keys: Record<string, () => unknown> = {
   "\x1b[3~": () => splice(cursor, cursor + 1), // Delete
   "\x17": () => splice(typed.slice(0, cursor).search(/\S*\s*$/), cursor), // Ctrl-W: the word before the cursor
   "\x15": () => splice(0, cursor), // Ctrl-U: all before the cursor
+  "\x16": () => paste(), // Ctrl-V: an image copied
   "\x01": () => move(0), // Ctrl-A
   "\x1b[H": () => move(0), // Home
   "\x1b[1~": () => move(0), // Home, as some terminals send it
