@@ -49,9 +49,9 @@ bee "…"        # start with a prompt
 
 Enter sends. While bee works, Enter steers: bee reads what you said once the commands it is running end, in the same
 turn, and until then it waits under the transcript. Alt-Enter queues it for when the turn is over. Ctrl-J is a new line.
-Up and Down recall what you said in the session, and below it what you were typing. Esc stops a turn, and pressed twice
-with nothing typed, begins `/fork`. Ctrl-C clears, stops or quits. Ctrl-A, Ctrl-E, Ctrl-W and Ctrl-U edit as in a
-shell. Ctrl-V pastes an image copied.
+Up and Down recall what you said in the session, as you left it until you send, and below it what you were typing. Esc
+stops a turn, and pressed twice with nothing typed, begins `/fork`. Ctrl-C clears, stops or quits. Ctrl-A, Ctrl-E,
+Ctrl-W and Ctrl-U edit as in a shell. Ctrl-V pastes an image copied.
 
 While bee works, its work is shown: what it thinks and runs, each thing as one row, and clicking it shows all of it.
 The answer is shown whole as it comes. Once the turn is over, ended or stopped, the work folds away behind what you
@@ -62,7 +62,8 @@ transcript is left in the terminal as it was last shown.
 `/session` is `new` or the title of another session here, and `/fork` is something you said in this one. A value named
 whole, or without its provider, is the one meant, whatever its case. What fits is shown under the prompt as you type.
 Tab goes through it, and Enter sends the command once only one fits. Anything else that starts with `/`, such as a path,
-is a prompt.
+is a prompt. A command is not said in the session: it is shown dark, as what this terminal says, and Up does not recall
+it.
 
 A fork begins as this session did before what you said, with it back in the prompt to say again. The session left stays
 as it was, so each branch is a session, called by what was first said in it, and the screen shows the one you are in.

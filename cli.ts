@@ -622,7 +622,7 @@ const stop = () => send({ method: "session/cancel", params: { sessionId } });
 async function open(id?: string) {
   [usage, title, top, back] = ["", "", undefined, 0];
   for (const each of [transcript, history]) each.length = 0;
-  for (const each of [ran, quoted, forks]) each.clear();
+  for (const each of [ran, quoted, forks, drafts]) each.clear();
   const opened = await call(id ? "session/load" : "session/new", { sessionId: id, cwd, mcpServers: [] });
   sessionId = id ?? opened.sessionId;
   options = opened.configOptions;
@@ -651,7 +651,7 @@ function queue(text: string, pick?: () => Promise<unknown>) {
   const next = async () => {
     queued.shift();
     if (!pick) return prompt(text);
-    user(text);
+    note(text);
     await pick();
     draw();
   };
@@ -662,7 +662,8 @@ function queue(text: string, pick?: () => Promise<unknown>) {
 // `/model`, `/thinking`, `/session` and `/fork` each take one of their values. The prompt is a command while it is `/`
 // and the start of a command's id, or a command's id and words; anything else, such as a path, is a prompt. The values
 // that fit the words are those of the best kind of fit there is: the value, the value after its provider, or a part of
-// it. What fits is shown under the prompt. Tab goes through it, and Enter sends the command once only one fits.
+// it. What fits is shown under the prompt. Tab goes through it, and Enter sends the command once only one fits. A
+// command is not said in the session, so it is shown as what this terminal says, and Up does not recall it.
 
 /** A command: what it is set to, each of its values, and what picking it does. */
 type Command = { id: string; set: string; values: Map<string, () => Promise<unknown>> };
@@ -746,7 +747,7 @@ function read(text: string): { fits: string[]; of?: string; pick?: () => Promise
 // ── Keyboard ────────────────────────────────────────────────────────────────
 
 let back = 0; // how many prompts Up has gone back
-let draft = ""; // what was typed when Up first went back
+const drafts = new Map<number, string>(); // what the prompt was at each place Up and Down left, by how far back it is
 let pasting = false; // between the marks a terminal puts around a paste
 let escaped = 0; // when Esc was last pressed with nothing typed and no turn to stop
 
@@ -759,11 +760,22 @@ function splice(from: number, to: number, text = "") {
 /** Put the cursor at `to`, or as near as the prompt allows. */
 const move = (to: number) => (cursor = Math.max(0, Math.min(typed.length, to)));
 
-/** Put a prompt you said in the prompt, `step` further back. Below all you said is what you were typing. */
+const graphemes = new Intl.Segmenter();
+
+/** Where the cursor would be `step` characters on: a character is what shows as one, such as an emoji. */
+function beside(step: number) {
+  const bounds = [...graphemes.segment(typed)].map((part) => part.index).concat(typed.length);
+  const here = bounds.findLastIndex((bound) => bound <= cursor);
+  return bounds[Math.max(0, Math.min(bounds.length - 1, here + step))];
+}
+
+/**
+ * Put a prompt you said in the prompt, `step` further back, as you left it. Below all you said is what you were typing.
+ */
 function recall(step: number) {
-  if (!back) draft = typed;
+  drafts.set(back, typed);
   back = Math.max(0, Math.min(history.length, back + step));
-  splice(0, typed.length, [...history, draft].at(-1 - back));
+  splice(0, typed.length, drafts.get(back) ?? history.at(-back));
 }
 
 /** Take the first of what fits, or at the next Tab the one after. */
@@ -779,6 +791,7 @@ function enter(wait = false) {
   const command = read(typed);
   if (!text || (command && !command.pick)) return; // a command, but not one value yet
   back = 0;
+  drafts.clear();
   top = undefined; // the transcript follows again
   splice(0, typed.length);
   if (command) return queue(command.fits[0], command.pick);
@@ -818,8 +831,8 @@ const keys: Record<string, () => unknown> = {
   "\x1b\r": () => enter(true), // Alt-Enter: for when the turn is over
   "\n": () => splice(cursor, cursor, "\n"), // Ctrl-J
   "\t": () => tab(), // Tab
-  "\x7f": () => splice(Math.max(0, cursor - 1), cursor), // Backspace
-  "\x1b[3~": () => splice(cursor, cursor + 1), // Delete
+  "\x7f": () => splice(beside(-1), cursor), // Backspace
+  "\x1b[3~": () => splice(cursor, beside(1)), // Delete
   "\x17": () => splice(typed.slice(0, cursor).search(/\S*\s*$/), cursor), // Ctrl-W: the word before the cursor
   "\x15": () => splice(0, cursor), // Ctrl-U: all before the cursor
   "\x16": () => paste(), // Ctrl-V: an image copied
@@ -829,8 +842,8 @@ const keys: Record<string, () => unknown> = {
   "\x05": () => move(typed.length), // Ctrl-E
   "\x1b[F": () => move(typed.length), // End
   "\x1b[4~": () => move(typed.length), // End, as some terminals send it
-  "\x1b[D": () => move(cursor - 1), // Left
-  "\x1b[C": () => move(cursor + 1), // Right
+  "\x1b[D": () => move(beside(-1)), // Left
+  "\x1b[C": () => move(beside(1)), // Right
   "\x1b[A": () => recall(1), // Up
   "\x1b[B": () => recall(-1), // Down
   "\x1b": () => esc(), // Esc
