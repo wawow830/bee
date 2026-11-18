@@ -454,7 +454,7 @@ function options(sid: string) {
 /** The sessions, latest first. One's title is the start of what the user first said in it. */
 function list(cwd?: string) {
   return readdirSync(SESSIONS)
-    .map((name) => name.slice(0, -".jsonl".length))
+    .flatMap((name) => /^([\w-]+)\.jsonl$/.exec(name)?.[1] ?? [])
     .map((sessionId) => {
       const first = conversation(sessionId).find((message) => message.role === "user")?.content ?? "";
       const updatedAt = statSync(file(sessionId)).mtime.toISOString();
