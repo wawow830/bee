@@ -792,8 +792,12 @@ const update = (sessionId: string, fields: object) =>
 const say = (sid: string, who: "user_message" | "agent_message" | "agent_thought", words: string) =>
   words && update(sid, { sessionUpdate: `${who}_chunk`, content: { type: "text", text: words } });
 
+/** Whether the model counted the tokens of a reply. One that failed or was stopped first did not. */
+const counted = (message: Message): message is Reply => message.role === "assistant" && message.usage.totalTokens > 0;
+
 /** How full the context is: the tokens in the conversation, as the model counted them in a reply. */
 const usage = (sid: string, reply: Reply) =>
+  counted(reply) &&
   update(sid, {
     sessionUpdate: "usage_update",
     used: reply.usage.totalTokens,
@@ -892,9 +896,9 @@ const parts = (blocks: any[]): User["content"] =>
         : { type: "text", text: block.text ?? block.uri ?? "" },
   );
 
-/** A session the editor opens, and how full its context was at the last reply. */
+/** A session the editor opens, and how full its context was at the last reply counted. */
 function open(sessionId: string) {
-  const last = conversation(sessionId).findLast((message) => message.role === "assistant");
+  const last = conversation(sessionId).findLast(counted);
   if (last) usage(sessionId, last);
   return { sessionId, configOptions: options(sessionId) };
 }
