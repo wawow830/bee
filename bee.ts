@@ -625,12 +625,23 @@ const beginning = (cwd: string): Line => ({
 /** The lines of each session nothing has been said in yet, held until the first thing said writes them. */
 const unborn = new Map<string, Line[]>();
 
-/** A session's lines. One that is not JSON is empty. */
+/** The lines a session's file holds. One that is not JSON is empty. */
+const written = (sid: string): Line[] => read(file(sid)).trimEnd().split("\n").map(parse);
+
+/**
+ * The lines of each session worked in, as last read, and how many bytes they were. A session is only appended to, so
+ * a file as long holds the same lines.
+ */
+const kept = new Map<string, { size: number; lines: Line[] }>();
+
+/** A session's lines. */
 function lines(sid: string): Line[] {
   const held = unborn.get(sid);
   if (held) return held;
   if (!/^[\w-]+$/.test(sid) || !existsSync(file(sid))) throw failure(-32002, `No session ${sid}`);
-  return read(file(sid)).trimEnd().split("\n").map(parse);
+  const { size } = statSync(file(sid));
+  if (kept.get(sid)?.size !== size) kept.set(sid, { size, lines: written(sid) });
+  return kept.get(sid)!.lines;
 }
 
 /**
@@ -945,7 +956,7 @@ function list(cwd?: string) {
   return readdirSync(SESSIONS)
     .flatMap((name) => /^([\w-]+)\.jsonl$/.exec(name)?.[1] ?? [])
     .map((sessionId) => {
-      const all = lines(sessionId);
+      const all = written(sessionId);
       const updatedAt = statSync(file(sessionId)).mtime.toISOString();
       return { sessionId, cwd: all[0].began!.cwd, title: title(all), updatedAt };
     })

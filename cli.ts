@@ -52,7 +52,7 @@ const pad = "  "; // every row begins with it, or with a mark as wide
 const mark = "› "; // what you say begins with it
 const run = "$ "; // what bee runs begins with it
 const spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"; // the mark, while bee works
-const frame = 80; // how many milliseconds each turn of the spinner shows
+const tick = 80; // how many milliseconds each turn of the spinner shows
 const choices = 8; // how many hints are shown
 const scrolled = 3; // how many rows a turn of the wheel scrolls
 
@@ -460,8 +460,20 @@ function layout() {
   return rows;
 }
 
-/** Draw the screen: as much of the transcript as fits, and under it what is queued and the prompt. */
+let stale = false; // whether the screen is yet to show what changed
+
+/** Draw the screen again, once all that changes it at once has: one frame, however many things changed. */
 function draw() {
+  if (stale) return;
+  stale = true;
+  setImmediate(() => {
+    stale = false;
+    frame();
+  });
+}
+
+/** A frame: as much of the transcript as fits, and under it what is queued and the prompt. */
+function frame() {
   const size = room();
   const input = chop(typed, size);
   const before = chop(typed.slice(0, cursor), size); // the cursor is at the end of these rows
@@ -475,7 +487,7 @@ function draw() {
   const set = (hint: string) => commands().find((one) => `/${one.id} ` === hint)!.set;
   const widest = Math.max(...listed.map((hint) => hint.trimEnd().length));
   const below = input.length - before.length + listed.length + (more ? 1 : 0);
-  const turning = spinner[Math.floor(Date.now() / frame) % spinner.length];
+  const turning = spinner[Math.floor(Date.now() / tick) % spinner.length];
   const rows = layout();
   const typing = [
     amber(busy() ? turning + " " : mark) + input[0],
@@ -642,7 +654,7 @@ type Session = { sessionId: string; title?: string };
 
 const cwd = process.cwd();
 let sessionId = "";
-let others: Session[] = []; // the other sessions here, latest first
+let here: Session[] = []; // the sessions here, latest first
 let last: Promise<unknown> = Promise.resolve(); // the last thing you sent, done: each waits for the one before
 
 const sessions = async (): Promise<Session[]> => (await call("session/list", { cwd })).sessions;
@@ -656,7 +668,10 @@ async function open(id?: string) {
   const opened = await call(id ? "session/load" : "session/new", { sessionId: id, cwd, mcpServers: [] });
   sessionId = id ?? opened.sessionId;
   options = opened.configOptions;
-  others = (await sessions()).filter((session) => session.sessionId !== sessionId);
+  sessions().then(
+    (all) => (here = all),
+    (error) => note(error.message, red),
+  ); // for /session, not to wait for
 }
 
 /** Open a fork of the session from before something you said, with it back in the prompt, before what is there. */
@@ -726,7 +741,9 @@ function commands(): Command[] {
     set: [usage, title && `"${title}"`, sessionId].filter(Boolean).join(" "),
     values: named([
       ["new", () => open()],
-      ...others.map((other): [string, () => Promise<void>] => [other.title ?? "", () => open(other.sessionId)]),
+      ...here
+        .filter((other) => other.sessionId !== sessionId)
+        .map((other): [string, () => Promise<void>] => [other.title ?? "", () => open(other.sessionId)]),
     ]),
   };
   const fork = {
@@ -910,7 +927,7 @@ await open(continued?.sessionId).catch(fatal);
 
 process.stdin.setRawMode(true).setEncoding("utf8").on("data", press);
 out.on("resize", draw);
-setInterval(() => busy() && draw(), frame); // the mark turns while bee works
+setInterval(() => busy() && draw(), tick); // the mark turns while bee works
 
 splice(0, 0, first);
 enter(); // one you start with is sent as one you type, unless it is a command not yet whole
