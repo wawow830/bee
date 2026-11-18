@@ -640,12 +640,10 @@ async function fork(cursorId?: string) {
 async function prompt(text: string) {
   unheard.push(text);
   prompts++;
-  const done = () => {
-    if (--prompts) return; // the turn answers each prompt in it
-    end();
-  };
+  let last = false; // whether this answer ends the turn, which answers each prompt in it
+  const done = () => (last = !--prompts) && end();
   const { stopReason } = await call("session/prompt", { sessionId, prompt: [{ type: "text", text }] }).finally(done);
-  if (stopReason !== "end_turn" && !prompts) note(stopReason);
+  if (stopReason !== "end_turn" && last) note(stopReason);
 }
 
 /** Wait for the turn to end, and for what was queued before; then say `text`, or, for a command, `pick` its value. */
