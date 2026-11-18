@@ -76,9 +76,11 @@ harness reads the file before every step and keeps no other state. For each sett
 `{cache}`, the latest line holds.
 
 **One tool.** `bash`: "Every command starts in the working directory. Returns the output, cut at 8,000 characters, or
-the image written." Output that is neither fails. One that ends elsewhere is told "(bee: shell cwd was reset to <it>)",
-and with the working directory gone, every one is told it does not exist. All bee says in an answer is said so,
-"(bee: …)", apart from what a command wrote. The computer is what lasts: files, and whatever a command left running.
+the image written." What a command wrote is passed through: text, cut to its first lines within 8,000 characters, or an
+image. All bee says is apart from it, as "(bee: …)": "(bee: output cut, <n> characters not shown)", "(bee: no output)"
+and "(bee: output is of unsupported format)"; and where a call cannot run, "(bee: tool does not exist)",
+"(bee: command is not a string)" or "(bee: working directory does not exist)". The computer is what lasts: files, and
+whatever a command left running.
 
 **An image is a file.** One pasted, in the editor or with Ctrl-V, is written to a file, and its path is what you said.
 The model sees an image by writing it, as with `cat`. The provider is the judge of an image: a request it refuses with
