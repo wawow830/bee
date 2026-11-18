@@ -25,8 +25,10 @@ import {
   getSupportedThinkingLevels,
   type Api,
   type AssistantMessage,
+  type ImageContent,
   type Message,
   type Model,
+  type TextContent,
   type ToolCall,
   type ToolResultMessage,
   type UserMessage,
@@ -97,12 +99,14 @@ const SESSIONS = join(HOME, "sessions");
 const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
 
 const SHOWN = 12_000; // characters of output the model sees per call
+const SEEN = 3_932_160; // bytes of an image the model sees: 5 MiB in base64, the most Anthropic takes
 
 const BASH = {
   name: "bash",
   description:
     "Every command starts in the working directory. " +
-    `Returns the output, cut at ${SHOWN.toLocaleString("en")} characters, or the image written.`,
+    `Returns the output, cut at ${SHOWN.toLocaleString("en")} characters, ` +
+    `or the image written, up to ${SEEN.toLocaleString("en")} bytes.`,
   parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
 };
 
@@ -248,6 +252,16 @@ const IMAGES: Record<string, RegExp> = {
   "image/webp": /^RIFF....WEBP/s,
 };
 
+/** An image, or, when it is more than the model sees, a line saying so. */
+function image(data: string, mimeType: string): ImageContent | TextContent {
+  const bytes = Buffer.byteLength(data, "base64");
+  if (bytes <= SEEN) return { type: "image", data, mimeType };
+  return {
+    type: "text",
+    text: `[${mimeType} of ${bytes.toLocaleString("en")} bytes, more than the ${SEEN.toLocaleString("en")} seen]`,
+  };
+}
+
 /** Run a command. Returns what it wrote, as an image or as text cut to its two ends, and whether it failed. */
 async function bash(sid: string, command: string, signal: AbortSignal) {
   // Written to a file, not a pipe, so the call ends when the command does, whatever it left running.
@@ -274,7 +288,7 @@ async function bash(sid: string, command: string, signal: AbortSignal) {
     const text = [written.toString("utf8").trimEnd(), reset].filter(Boolean).join("\n") || "(no output)";
     const cut = text.length - SHOWN;
     const content: ToolResultMessage["content"] = mimeType
-      ? [{ type: "image", data: written.toString("base64"), mimeType }]
+      ? [image(written.toString("base64"), mimeType)]
       : [
           {
             type: "text",
@@ -327,8 +341,8 @@ const usage = (sid: string, reply: AssistantMessage) =>
   });
 
 /** A message's content, as plain text. */
-const plain = (content: string | { type: string; text?: string }[]) =>
-  typeof content === "string" ? content : content.map((block) => block.text ?? "").join("");
+const plain = (content: string | { type: string; text?: string; mimeType?: string }[]) =>
+  typeof content === "string" ? content : content.map((block) => block.text ?? `[${block.mimeType}]`).join("");
 
 /** A code block, fenced by more backticks than it holds. */
 function fenced(body: string, language = "") {
@@ -405,7 +419,7 @@ function list(cwd?: string) {
 const parts = (blocks: any[]): UserMessage["content"] =>
   blocks.map((block) =>
     block.type === "image"
-      ? { type: "image", data: block.data, mimeType: block.mimeType }
+      ? image(block.data, block.mimeType)
       : block.type === "resource"
         ? { type: "text", text: `<file uri="${block.resource.uri}">\n${block.resource.text ?? ""}\n</file>` }
         : { type: "text", text: block.text ?? block.uri ?? "" },
