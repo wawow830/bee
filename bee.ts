@@ -115,7 +115,8 @@ type Model = {
   compat?: { forceAdaptiveThinking?: boolean };
 };
 
-type Options = { sessionId: string; thinking: Level; cache: Cache; signal: AbortSignal };
+/** `origin`: how the session began, the same in each of its forks. Codex keeps its cache by it. */
+type Options = { origin: string; thinking: Level; cache: Cache; signal: AbortSignal };
 type Tell = (type: "text" | "thinking", words: string) => void;
 type Api = {
   request(
@@ -399,9 +400,9 @@ function account(token: string): string {
   throw new Error("The key is not a ChatGPT token: it names no account.");
 }
 
-/** OpenAI's Responses, as Codex takes them. The session is the cache's key. */
+/** OpenAI's Responses, as Codex takes them. How the session began is the cache's key, so a fork begins cached. */
 const codex: Api = {
-  request(model, messages, { sessionId, thinking, cache }) {
+  request(model, messages, { origin, thinking, cache }) {
     const [system, ...rest] = messages as [System, ...Said[]];
     const media = (content: User["content"]) =>
       blocks(content).map((block) =>
@@ -447,7 +448,7 @@ const codex: Api = {
         "chatgpt-account-id": account(model.apiKey),
         "openai-beta": "responses=experimental",
         originator: "bee",
-        "session-id": sessionId,
+        "session-id": origin,
         accept: "text/event-stream",
       },
       body: {
@@ -463,7 +464,7 @@ const codex: Api = {
           parameters,
         })),
         include: ["reasoning.encrypted_content"],
-        ...(cache !== "none" && { prompt_cache_key: sessionId }),
+        ...(cache !== "none" && { prompt_cache_key: origin }),
         ...(model.reasoning && { reasoning: { effort, ...(thinking !== "off" && { summary: "auto" }) } }),
       },
     };
@@ -664,6 +665,9 @@ function append(sid: string, ...added: Line[]) {
 
 const cwdOf = (sid: string) => lines(sid)[0].cwd!;
 
+/** How a session began, as a key: the same in each of its forks, as each begins with its first line. */
+const origin = (sid: string) => Bun.hash(JSON.stringify(lines(sid)[0])).toString(36);
+
 const conversation = (sid: string) => lines(sid).flatMap((line) => (line.message ? [line.message] : []));
 
 /**
@@ -703,7 +707,7 @@ function fork(sid: string, cursorId?: string) {
 async function ask(sid: string, signal: AbortSignal) {
   const { model, thinking, cache } = settings(sid);
   const tell: Tell = (type, words) => say(sid, type === "text" ? "agent_message" : "agent_thought", words);
-  return stream(model, conversation(sid), { sessionId: sid, thinking, cache, signal }, tell);
+  return stream(model, conversation(sid), { origin: origin(sid), thinking, cache, signal }, tell);
 }
 
 /** A turn under way: how to stop it, what the user said that it has not read, and how it ends. */

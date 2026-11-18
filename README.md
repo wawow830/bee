@@ -81,10 +81,10 @@ Closing the editor or the terminal stops a turn as Esc does, so what was said an
 **A fork is a session that begins as another did.** Its file begins with the other's lines, all of them or those before
 something the user said, then `{forked}`, naming the session they are of, then the settings chosen after those lines, so
 the fork is set as the session is. Nothing is undone, and a fork needs nothing of the session it names: the branches of
-a conversation are sessions sharing their first lines, and the provider's cache of those holds in each. A fork is called
-by the first thing said in it, and like a new session, has no file until then. In ACP it is `session/fork`, at a cursor:
-bee gives one before each thing the user said, and tells an editor that reads cursors what the user said as it hears it,
-so the editor holds what each cursor is before.
+a conversation are sessions sharing their first lines, and a fork begins with the provider's cache of those. A fork is
+called by the first thing said in it, and like a new session, has no file until then. In ACP it is `session/fork`, at a
+cursor: bee gives one before each thing the user said, and tells an editor that reads cursors what the user said as it
+hears it, so the editor holds what each cursor is before.
 
 **Every request is the file's messages.** So each begins as the last one did, and the provider's cache of it holds. The
 harness reads the file before every step and keeps no other state. For each setting, `{model}`, `{thinking}` or
@@ -104,7 +104,8 @@ The model sees an image by writing it, as with `cat`.
 **bee speaks to the models itself.** A request is the file's messages, as the API takes them: a reply that failed or was
 stopped is left out, a call nothing answered is answered "(bee: not run)", an answer that says nothing says
 "(bee: no output)", and what only one model can read, its thinking and the ids it gave, is sent back only to it. The
-prompt and the conversation are each cached to their end.
+prompt and the conversation are each cached to their end, and Codex keeps the cache by how the session began, so a fork
+shares it.
 
 **The provider is the judge.** A request it refuses as it is, it would refuse again, so what commands returned since the
 last reply is sent as "(bee: provider refused: <why>)" from then on, and the turn asks again. So a session never holds
