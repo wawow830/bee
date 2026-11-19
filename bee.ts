@@ -21,6 +21,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
+import { setTimeout as sleep } from "node:timers/promises";
 import { version } from "./package.json";
 
 console.log = console.error; // stdout carries the protocol and nothing else
@@ -56,7 +57,8 @@ type Began = { cwd: string; prompt: string; tools: Tool[]; timestamp: number };
 type User = { content: (Text | Image)[]; timestamp: number };
 /**
  * What a model said. `end`: how it ended, if not of itself: cut at its longest, stopped, failed, or refused, the
- * request being refused as it was, so the same again would be refused again. `why`: the error it ended with.
+ * request being refused as it was, so the same again would be refused again. `why`: the error it ended with, and
+ * `status`: the HTTP status the provider answered it with, if it answered.
  */
 type Reply = {
   provider: string;
@@ -66,6 +68,7 @@ type Reply = {
   timestamp: number;
   end?: "cut" | "stopped" | "failed" | "refused";
   why?: string;
+  status?: number;
 };
 /** What a command returned, to the call that asked for it. */
 type Result = { call: string; content: (Text | Image)[]; failed: boolean; timestamp: number };
@@ -141,12 +144,22 @@ async function stream(model: Model, began: Began, said: Said[], chosen: Options,
   } catch (error: any) {
     reply.end = chosen.signal.aborted ? "stopped" : REFUSALS.includes(error.status) ? "refused" : "failed";
     reply.why = error.message;
+    reply.status = error.status;
   }
   return reply;
 }
 
 /** The statuses of a request refused as it was: sent the same again, it would be refused again. */
 const REFUSALS = [400, 413];
+
+/**
+ * Whether a reply failed only for now: the provider did not answer, as the connection or its stream broke, or it
+ * answered to ask later, as too many requests or its own failure.
+ */
+const later = ({ end, status = 0 }: Reply) => end === "failed" && (!status || status === 429 || status >= 500);
+
+/** How many times a reply that failed for now is asked again: after 1 second, then each time twice as long. */
+const TRIES = 6;
 
 /**
  * The conversation as an API takes it: a reply that failed or was stopped is left out, with what answered it, a call
@@ -736,10 +749,11 @@ const hear = (sid: string, said: User[]) => {
  * Read what the user said, ask, run what it asks for, and again until it has nothing to run and nothing more was
  * said. A prompt sent during a turn joins it, and the model reads it once the commands it is running end. A reply is
  * written once its commands end, with what they returned. A request refused with what the commands returned is asked
- * again, with the refusal in its place.
+ * again, with the refusal in its place. One that failed for now is asked again, the same, a few times, each later.
  */
 async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<string> {
   let results: Result[] = [];
+  let tries = 0; // how many times in a row a reply failed for now
   try {
     for (;;) {
       hear(sid, said);
@@ -751,6 +765,11 @@ async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<str
       for (const call of calls) if (!signal.aborted) results.push(await run(sid, call, signal));
       append(sid, { reply }, ...results.map((result) => ({ result })));
       if (again) continue;
+      tries = later(reply) ? tries + 1 : 0;
+      if (tries && tries <= TRIES) {
+        await sleep(1000 * 2 ** (tries - 1), null, { signal }).catch(() => {});
+        continue;
+      }
       if (reply.end === "failed" || reply.end === "refused") throw new Error(reply.why);
       if (!calls.length && !said.length && !signal.aborted) return reply.end === "cut" ? "max_tokens" : "end_turn";
     }
