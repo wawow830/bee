@@ -85,7 +85,8 @@ const result = (call: Call, content: Result["content"], failed: boolean): Result
 });
 
 // ── The APIs ────────────────────────────────────────────────────────────────
-// bee speaks to two providers itself, each in its API: Anthropic, in its Messages, and Codex, in OpenAI's Responses.
+// bee speaks to three providers itself, each in its API: Anthropic, in its Messages, Codex, in OpenAI's Responses, and
+// OpenRouter, in OpenAI's Chat Completions.
 // Each lists the models it has, makes a request of the conversation, and a reply of the events it streams back.
 
 /** The thinking levels the APIs take, least first. A model has those its provider lists. */
@@ -519,8 +520,135 @@ const codex: Api = {
   },
 };
 
+/** The fields of OpenRouter's reasoning details that a piece streamed continues. */
+const CONTINUED = ["text", "summary", "data"];
+
+/**
+ * OpenRouter's Chat Completions. Its models are those it lists that take tools, each at the efforts it takes if it
+ * reasons, else off. Its thinking is sealed as the reasoning details it streams; another's goes as its text. The prompt
+ * and the conversation are each marked to be cached to their end, for the models it caches so.
+ */
+const openrouter: Api = {
+  baseUrl: "https://openrouter.ai/api/v1",
+  listing: ({ baseUrl, apiKey }) => ({ url: `${baseUrl}/models`, headers: { authorization: `Bearer ${apiKey}` } }),
+  models: (listing) =>
+    (listing.data ?? [])
+      .filter((listed: any) => listed.supported_parameters?.includes("tools"))
+      .map((listed: any) => {
+        const reasons = listed.supported_parameters.includes("reasoning");
+        const { id, name, context_length: contextWindow } = listed;
+        return {
+          id,
+          name,
+          contextWindow,
+          levels: reasons ? LEVELS.filter((level) => level !== "max") : ["off"],
+          listed,
+        };
+      }),
+
+  request(model, began, conversation, { thinking, cache }) {
+    const mark =
+      cache === "none" ? {} : { cache_control: { type: "ephemeral", ...(cache === "long" && { ttl: "1h" }) } };
+    const media = (content: User["content"]) =>
+      content.map((block) =>
+        block.type === "text"
+          ? { type: "text", text: block.text }
+          : { type: "image_url", image_url: { url: `data:${block.mimeType};base64,${block.data}` } },
+      );
+    const wire = (said: Said): { role: string; content: any; [field: string]: unknown } => {
+      if ("user" in said) return { role: "user", content: media(said.user.content) };
+      if ("result" in said)
+        return { role: "tool", tool_call_id: callId(said.result.call), content: media(said.result.content) };
+      const of = <T extends Reply["content"][number]["type"]>(type: T) =>
+        said.reply.content.filter(
+          (block): block is Extract<Reply["content"][number], { type: T }> => block.type === type,
+        );
+      const words = of("text")
+        .map((block) => block.text)
+        .join("");
+      const calls = of("call").map(({ id, name, arguments: input }) => ({
+        id: callId(id),
+        type: "function",
+        function: { name, arguments: JSON.stringify(input) },
+      }));
+      const reasoning = of("thinking").flatMap(({ text, sealed }) => sealed ?? [{ type: "reasoning.text", text }]);
+      return {
+        role: "assistant",
+        content: words || null,
+        ...(calls.length && { tool_calls: calls }),
+        ...(reasoning.length && { reasoning_details: reasoning }),
+      };
+    };
+    const messages = conversation.map(wire);
+    Object.assign(messages.at(-1)?.content.at(-1) ?? {}, mark);
+    return {
+      url: `${model.baseUrl}/chat/completions`,
+      headers: { authorization: `Bearer ${model.apiKey}`, "x-title": "bee" },
+      body: {
+        model: model.id,
+        stream: true,
+        stream_options: { include_usage: true },
+        messages: [{ role: "system", content: [{ type: "text", text: began.prompt, ...mark }] }, ...messages],
+        tools: began.tools.map(({ name, description, parameters }) => ({
+          type: "function",
+          function: { name, description, parameters },
+        })),
+        reasoning: { effort: thinking === "off" ? "none" : thinking },
+      },
+    };
+  },
+
+  async read(incoming, reply, tell) {
+    const begin = <T extends Reply["content"][number]>(block: T) => (reply.content.push(block), block);
+    let thinking: Thinking | undefined;
+    let text: Text | undefined;
+    const thought = () => (thinking ??= begin<Thinking>({ type: "thinking", text: "", sealed: [] }));
+    const said = () => (text ??= begin<Text>({ type: "text", text: "" }));
+    const calls: { call: Call; json: string }[] = []; // by the index the API gives each
+    let finished: string | undefined;
+    for await (const { error, usage, choices } of incoming) {
+      if (error) throw new Error(`${error.code}: ${error.message}`);
+      if (usage) {
+        const { prompt_tokens, completion_tokens: output, prompt_tokens_details: cached = {} } = usage;
+        const cacheRead = cached.cached_tokens ?? 0;
+        const cacheWrite = cached.cache_write_tokens ?? 0;
+        reply.usage = { input: prompt_tokens - cacheRead - cacheWrite, output, cacheRead, cacheWrite };
+      }
+      const { delta = {}, finish_reason } = choices?.[0] ?? {};
+      if (delta.reasoning) {
+        thought().text += delta.reasoning;
+        tell("thinking", delta.reasoning);
+      }
+      for (const piece of delta.reasoning_details ?? []) {
+        const { sealed } = thought();
+        const held = sealed.find((detail: any) => detail.index === piece.index) ?? sealed[sealed.push({}) - 1];
+        for (const [key, value] of Object.entries(piece))
+          held[key] = CONTINUED.includes(key) ? (held[key] ?? "") + value : value;
+      }
+      if (delta.content) {
+        said().text += delta.content;
+        tell("text", delta.content);
+      }
+      for (const piece of delta.tool_calls ?? []) {
+        const under = (calls[piece.index] ??= {
+          call: begin<Call>({ type: "call", id: "", name: "", arguments: {} }),
+          json: "",
+        });
+        under.call.id ||= piece.id ?? "";
+        under.call.name ||= piece.function?.name ?? "";
+        under.json += piece.function?.arguments ?? "";
+      }
+      finished = finish_reason ?? finished;
+    }
+    if (!finished) throw new Error("The stream ended before the reply did");
+    for (const { call, json } of calls.filter(Boolean)) call.arguments = JSON.parse(json || "{}");
+    if (!["stop", "tool_calls", "length"].includes(finished)) throw new Error(`The model stopped: ${finished}`);
+    reply.end = finished === "length" ? "cut" : undefined;
+  },
+};
+
 /** The providers bee speaks to, by the names models.json gives them. */
-const PROVIDERS: Record<string, Api> = { anthropic, "openai-codex": codex };
+const PROVIDERS: Record<string, Api> = { anthropic, "openai-codex": codex, openrouter };
 
 // ── Models ──────────────────────────────────────────────────────────────────
 
