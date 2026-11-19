@@ -682,7 +682,7 @@ async function forkFrom(cursorId: string, text: string) {
 
 /** Send bee a prompt, and wait for its turn to end. One sent while a turn is under way joins it, once bee hears it. */
 async function prompt(text: string) {
-  unheard.push(text);
+  if (text) unheard.push(text); // bee hears only what says something
   prompts++;
   const done = () => !--prompts && end(); // the turn answers each prompt in it, and is over at the last
   await call("session/prompt", { sessionId, prompt: [{ type: "text", text }] }).finally(done);
@@ -833,7 +833,7 @@ function tab() {
 function enter(wait = false) {
   const text = typed.trim();
   const command = read(typed);
-  if (!text || (command && !command.pick)) return; // a command, but not one value yet
+  if (command && !command.pick) return; // a command, but not one value yet
   back = 0;
   drafts.clear();
   top = undefined; // the transcript follows again

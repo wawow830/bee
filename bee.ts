@@ -79,6 +79,8 @@ type Said = { user: User } | { reply: Reply } | { result: Result };
 const bee = (words: string) => `(bee: ${words})`;
 
 const user = (content: User["content"]): User => ({ content, timestamp: Date.now() });
+/** Whether content says nothing: no image, and no text but blanks. */
+const silent = (content: (Text | Image)[]) => content.every((block) => block.type === "text" && !block.text.trim());
 const result = (call: Call, content: Result["content"], failed: boolean): Result => ({
   call: call.id,
   content,
@@ -178,8 +180,7 @@ function sendable(conversation: Said[]): Said[] {
   for (const said of conversation) {
     if ("result" in said) {
       const { result } = said;
-      const silent = result.content.every((block) => block.type === "text" && !block.text.trim());
-      const answer = silent
+      const answer = silent(result.content)
         ? { result: { ...result, content: [{ type: "text" as const, text: bee("no output") }] } }
         : said;
       if (unanswered.delete(result.call)) sent.push(answer);
@@ -736,18 +737,28 @@ async function ask(sid: string, signal: AbortSignal) {
 type Turn = { abort: AbortController; said: User[]; done?: Promise<string> };
 const turns = new Map<string, Turn>();
 
-/** Write what the user said that the turn has not read, in order. An editor that reads cursors is told. */
+/**
+ * Write what the user said that the turn has not read, in order, but for what says nothing. An editor that reads
+ * cursors is told.
+ */
 const hear = (sid: string, said: User[]) => {
-  for (const told of said.splice(0)) {
+  for (const told of said.splice(0).filter((told) => !silent(told.content))) {
     const at = lines(sid).length;
     append(sid, { user: told });
     if (cursors) quote(sid, told, at);
   }
 };
 
+/** Whether something said waits for the model to answer it: the last thing sent is not a reply. */
+function waiting(sid: string) {
+  const last = sendable(conversation(sid)).at(-1);
+  return !!last && !("reply" in last);
+}
+
 /**
- * Read what the user said, ask, run what it asks for, and again until it has nothing to run and nothing more was
- * said. A prompt sent during a turn joins it, and the model reads it once the commands it is running end. A reply is
+ * Read what the user said, and while something waits for an answer, ask, run what it asks for, and again until it has
+ * nothing to run and nothing more was said. A prompt that says nothing asks again what a turn failed or was stopped
+ * before answering. A prompt sent during a turn joins it, and the model reads it once the commands it is running end. A reply is
  * written once its commands end, with what they returned. A request refused with what the commands returned is asked
  * again, with the refusal in its place. One that failed for now is asked again, the same, a few times, each later.
  */
@@ -758,6 +769,7 @@ async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<str
     for (;;) {
       hear(sid, said);
       if (signal.aborted) return "cancelled";
+      if (!waiting(sid)) return "end_turn";
       const reply = await ask(sid, signal);
       const again = reply.end === "refused" && results.length > 0;
       const calls = reply.end ? [] : reply.content.filter((block) => block.type === "call");
