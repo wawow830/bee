@@ -31,8 +31,9 @@ A session begins with the settings in `~/.bee/agent/settings.json`. bee chooses 
 
 Model, thinking and cache can be changed per session from the editor. A prompt is sent only with a model there is a key
 for, a thinking level it lists, and a cache of `none`, `short` (five minutes) or `long` (an hour); else it fails, saying
-which. What was said is sent as it was said, thinking too, to whichever provider is asked, and that provider judges it:
-a provider cannot read another's thinking, so it refuses a session that holds some.
+which. What was said is sent to whichever provider is asked as it can read it: its own thinking, sealed as it gave it,
+and of another's what its API carries. Anthropic and Codex each carry only their own thinking, so a session can change
+provider, and change back to find its thinking as it was.
 
 ### In a terminal
 

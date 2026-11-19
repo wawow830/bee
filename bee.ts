@@ -42,8 +42,8 @@ function parse(line: string) {
 
 // ── Said ────────────────────────────────────────────────────────────────────
 // What a session's file holds: how it began, and what was said in it, by the user, a model and a command. What only a
-// model's provider can read is `sealed`, as the provider gave it: its thinking, and the ids it gave. All of it is sent
-// as it was said, to whichever provider is asked, and that provider judges it.
+// model's provider can read is `sealed`, as the provider gave it: its thinking, and the ids it gave. A provider is sent
+// what was said as it can read it: its own seals, and no other's. Each API carries of that what its wire can.
 
 type Text = { type: "text"; text: string; sealed?: any };
 type Image = { type: "image"; data: string; mimeType: string };
@@ -129,7 +129,7 @@ async function stream(model: Model, began: Began, said: Said[], chosen: Options,
   const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   const reply: Reply = { provider: model.provider, model: model.id, content: [], usage, timestamp: Date.now() };
   try {
-    const { url, headers, body } = api.request(model, began, sendable(said), chosen);
+    const { url, headers, body } = api.request(model, began, readable(sendable(said), model.provider), chosen);
     const response = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json", ...headers },
@@ -186,6 +186,14 @@ function sendable(conversation: Said[]): Said[] {
   close();
   return sent;
 }
+
+/** What was said, as a provider can read it: a seal is read only by the provider that made it. */
+const readable = (conversation: Said[], provider: string): Said[] =>
+  conversation.map((said) =>
+    "reply" in said && said.reply.provider !== provider
+      ? { reply: { ...said.reply, content: said.reply.content.map(({ sealed, ...block }) => block) } }
+      : said,
+  );
 
 /** What was said, as a request was refused with it: what a command returned is the refusal. */
 const refused = (said: Said, why: string): Said =>
@@ -270,6 +278,7 @@ const anthropic: Api = {
       if (said.type === "text") return said.text.trim() ? [{ type: "text", text: said.text }] : [];
       if (said.type === "call")
         return [{ type: "tool_use", id: callId(said.id), name: said.name, input: said.arguments }];
+      if (!said.sealed) return []; // thinking it cannot verify, it does not take
       return said.redacted
         ? [{ type: "redacted_thinking", data: said.sealed }]
         : [{ type: "thinking", thinking: said.text, signature: said.sealed }];
@@ -417,7 +426,7 @@ const codex: Api = {
           : { type: "input_image", image_url: `data:${block.mimeType};base64,${block.data}` },
       );
     const block = ({ sealed, ...said }: Text | Thinking | Call): object[] => {
-      if (said.type === "thinking") return [sealed];
+      if (said.type === "thinking") return sealed ? [sealed] : []; // reasoning is only its encrypted item
       if (said.type === "call") {
         const { id, name, arguments: input } = said;
         return [
