@@ -23,14 +23,16 @@ are those each provider lists.
 | ---------- | ----------------------------------------------------- |
 | `BEE_HOME` | Where bee keeps its files. Without it, `~/.bee/agent` |
 
-Defaults go in `~/.bee/agent/settings.json`, and a session begins with them. Without it, the first model with a key,
-`medium`, and a five-minute cache:
+A session begins with the settings in `~/.bee/agent/settings.json`. bee chooses none itself, so it sets each:
 
 ```json
 { "model": "anthropic/claude-opus-5-5", "thinking": "high", "cache": "long" }
 ```
 
-Model, thinking and cache can be changed per session from the editor.
+Model, thinking and cache can be changed per session from the editor. A prompt is sent only with a model there is a key
+for, a thinking level it lists, and a cache of `none`, `short` (five minutes) or `long` (an hour); else it fails, saying
+which. What was said is sent as it was said, thinking too, to whichever provider is asked, and that provider judges it:
+a provider cannot read another's thinking, so it refuses a session that holds some.
 
 ### In a terminal
 

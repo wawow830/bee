@@ -42,7 +42,8 @@ function parse(line: string) {
 
 // ── Said ────────────────────────────────────────────────────────────────────
 // What a session's file holds: how it began, and what was said in it, by the user, a model and a command. What only a
-// model's provider can read is `sealed`, as the provider gave it: its thinking, and the ids it gave.
+// model's provider can read is `sealed`, as the provider gave it: its thinking, and the ids it gave. All of it is sent
+// as it was said, to whichever provider is asked, and that provider judges it.
 
 type Text = { type: "text"; text: string; sealed?: any };
 type Image = { type: "image"; data: string; mimeType: string };
@@ -210,9 +211,6 @@ async function* events(body: ReadableStream<Uint8Array>) {
   }
 }
 
-/** Whether a reply is of a model's provider, so its thinking and the ids it gave can be sent back to it. */
-const native = (reply: Reply, model: Model) => reply.provider === model.provider;
-
 /** A tool's result as one text, if it is only text. */
 const textual = (content: Result["content"]) =>
   content.every((block): block is Text => block.type === "text")
@@ -268,18 +266,16 @@ const anthropic: Api = {
             ? { type: "image", source: { type: "base64", media_type: block.mimeType, data: block.data } }
             : { type: "text", text: block.text },
         );
-    const block = (said: Text | Thinking | Call, reply: Reply): object[] => {
+    const block = (said: Text | Thinking | Call): object[] => {
       if (said.type === "text") return said.text.trim() ? [{ type: "text", text: said.text }] : [];
       if (said.type === "call")
         return [{ type: "tool_use", id: callId(said.id), name: said.name, input: said.arguments }];
-      if (!native(reply, model) || !said.sealed) return [];
       return said.redacted
         ? [{ type: "redacted_thinking", data: said.sealed }]
         : [{ type: "thinking", thinking: said.text, signature: said.sealed }];
     };
     const wire = (said: Said): { role: string; content: object[] } => {
-      if ("reply" in said)
-        return { role: "assistant", content: said.reply.content.flatMap((each) => block(each, said.reply)) };
+      if ("reply" in said) return { role: "assistant", content: said.reply.content.flatMap(block) };
       if ("user" in said) return { role: "user", content: media(said.user.content) };
       const { call, content, failed } = said.result;
       const answer = textual(content) ?? media(content);
@@ -420,9 +416,8 @@ const codex: Api = {
           ? { type: "input_text", text: block.text }
           : { type: "input_image", image_url: `data:${block.mimeType};base64,${block.data}` },
       );
-    const block = (said: Text | Thinking | Call, reply: Reply): object[] => {
-      const sealed = native(reply, model) && said.sealed;
-      if (said.type === "thinking") return sealed ? [sealed] : [];
+    const block = ({ sealed, ...said }: Text | Thinking | Call): object[] => {
+      if (said.type === "thinking") return [sealed];
       if (said.type === "call") {
         const { id, name, arguments: input } = said;
         return [
@@ -441,7 +436,7 @@ const codex: Api = {
       return [{ type: "message", role: "assistant", content, status: "completed", ...sealed }];
     };
     const wire = (said: Said): object[] => {
-      if ("reply" in said) return said.reply.content.flatMap((each) => block(each, said.reply));
+      if ("reply" in said) return said.reply.content.flatMap(block);
       if ("user" in said) return [{ role: "user", content: media(said.user.content) }];
       const output = textual(said.result.content) ?? media(said.result.content);
       return [{ type: "function_call_output", call_id: callId(said.result.call), output }];
@@ -562,24 +557,19 @@ const providers = await Promise.all(
 );
 const available = providers.flat().sort((a, b) => byName(ref(a), ref(b)));
 
-/** The level a model has that is nearest the one asked for: it, or the nearest above, or else below. */
-function nearest(model: Model, level: Level) {
-  const at = LEVELS.indexOf(level);
-  return [...LEVELS.slice(at), ...LEVELS.slice(0, at).reverse()].find((one) => model.levels.includes(one))!;
-}
-
 // ── Sessions ────────────────────────────────────────────────────────────────
 // A session is a file of lines, written as things happen, each one thing: how it began, something said, a setting
 // chosen, or the session it was forked from. Lines are only appended, so every request begins with the last one, and
 // the provider's cache of it holds. The first line is how the session began: its directory, the prompt and the tools,
-// with the settings in settings.json. The file is made when the first thing is said in it. A reply that runs commands
-// is written with what they returned, in one write, so nothing comes between a command and its output, from any
-// editor. A fork is a session that begins as another did, up to where it parts from it: its file begins with the
-// other's lines up to there, then a line naming the session they are of, then the settings chosen after there, so it
-// is set as the other is.
+// with the settings in settings.json, which sets each. The file is made when the first thing is said in it. A reply
+// that runs commands is written with what they returned, in one write, so nothing comes between a command and its
+// output, from any editor. A fork is a session that begins as another did, up to where it parts from it: its file
+// begins with the other's lines up to there, then a line naming the session they are of, then the settings chosen after
+// there, so it is set as the other is.
 
 const SETTINGS = ["model", "thinking", "cache"] as const;
-type Settings = Partial<Record<(typeof SETTINGS)[number], string>>;
+type Setting = (typeof SETTINGS)[number];
+type Settings = Partial<Record<Setting, string>>;
 type Line = Settings & { began?: Began; user?: User; reply?: Reply; result?: Result; forked?: string };
 
 /** Whether a line is something said. */
@@ -611,16 +601,18 @@ function instructions(cwd: string) {
     .join("\n\n");
 }
 
-/** How a session begins. */
-const beginning = (cwd: string): Line => ({
-  ...JSON.parse(read(join(HOME, "settings.json"), "{}")),
-  began: {
+/** How a session begins: as settings.json sets it. bee sets nothing itself. */
+function beginning(cwd: string): Line {
+  const set: Settings = JSON.parse(read(join(HOME, "settings.json"), "{}"));
+  for (const setting of SETTINGS) if (!(setting in set)) throw failure(-32000, `settings.json sets no ${setting}`);
+  const began = {
     cwd,
     prompt: `\nYou are an agent in the bee harness.\n\n${instructions(cwd)}`.trimEnd(),
     tools: [BASH],
     timestamp: Date.now(),
-  },
-});
+  };
+  return { ...set, began };
+}
 
 /** The lines of each session nothing has been said in yet, held until the first thing said writes them. */
 const unborn = new Map<string, Line[]>();
@@ -680,18 +672,28 @@ const origin = (sid: string) => Bun.hash(JSON.stringify(lines(sid)[0])).toString
 /** What was said in a session. */
 const conversation = (sid: string): Said[] => lines(sid).filter(says);
 
-/**
- * For each setting, the latest line that makes sense holds. Without one, the model is the first there is a key for,
- * thinking is medium, and the prompt stays cached for five minutes. ("long" is an hour.)
- */
-function settings(sid: string) {
-  if (!available.length) throw failure(-32000, "No provider key is set.");
+/** What each setting is set to: what the latest line that sets it says. The first line sets each. */
+function chosen(sid: string) {
   const all = lines(sid);
-  const latest = <T>(pick: (line: Line) => T | undefined) => all.map(pick).findLast(Boolean);
-  const model = latest((line) => available.find((one) => ref(one) === line.model)) ?? available[0];
-  const level = latest((line) => LEVELS.find((level) => level === line.thinking)) ?? "medium";
-  const cache = latest((line) => CACHES.find((cache) => cache === line.cache)) ?? "short";
-  return { model, thinking: nearest(model, level), cache };
+  return Object.fromEntries(
+    SETTINGS.map((setting) => [setting, all.findLast((line) => setting in line)![setting]!]),
+  ) as Record<Setting, string>;
+}
+
+/** The model chosen, if there is a key for it. */
+const modelOf = (sid: string) => available.find((one) => ref(one) === chosen(sid).model);
+
+/** Fail unless a setting can be the value: one of its options. */
+function allow(sid: string, setting: string, value: string) {
+  const option = options(sid).find((option) => option.id === setting);
+  if (!option?.options.some((one) => one.value === value)) throw failure(-32602, `No ${setting} ${value}`);
+}
+
+/** The settings a request is made with, each as chosen. One that is not one of its options fails it. */
+function settings(sid: string) {
+  const set = chosen(sid);
+  for (const setting of SETTINGS) allow(sid, setting, set[setting]);
+  return { model: modelOf(sid)!, thinking: set.thinking as Level, cache: set.cache as Cache };
 }
 
 /**
@@ -885,9 +887,9 @@ function describe(sid: string) {
   const all = lines(sid);
   const called = title(written(sid));
   const used = all.map((line) => (line.reply ? counted(line.reply.usage) : 0)).findLast(Boolean);
-  const size = settings(sid).model.contextWindow;
+  const size = modelOf(sid)?.contextWindow;
   if (called) update(sid, { sessionUpdate: "session_info_update", title: called });
-  if (used) update(sid, { sessionUpdate: "usage_update", used, size });
+  if (used && size) update(sid, { sessionUpdate: "usage_update", used, size });
 }
 
 /** How many tokens a request was, and its reply. */
@@ -946,13 +948,18 @@ function replay(sid: string) {
   }
 }
 
-/** The settings, each as the editor changes it. Each one's id is its key in a line. */
+/**
+ * The settings, each as the editor changes it: as chosen, and its options: the models there is a key for, the levels
+ * the model chosen thinks at, and the caches. Each one's id is its key in a line.
+ */
 function options(sid: string) {
-  const { model, thinking, cache } = settings(sid);
+  const { model, thinking, cache } = chosen(sid);
   const models = available.map((one) => ({ value: ref(one), name: one.name }));
-  const [levels, caches] = [model.levels, CACHES].map((values) => values.map((value) => ({ value, name: value })));
+  const [levels, caches] = [modelOf(sid)?.levels ?? [], CACHES].map((values) =>
+    values.map((value) => ({ value, name: value })),
+  );
   return [
-    { id: "model", name: "Model", category: "model", currentValue: ref(model), options: models },
+    { id: "model", name: "Model", category: "model", currentValue: model, options: models },
     { id: "thinking", name: "Thinking", category: "thought_level", currentValue: thinking, options: levels },
     { id: "cache", name: "Cache", currentValue: cache, options: caches },
   ].map((option) => ({ type: "select", ...option }));
@@ -1021,8 +1028,7 @@ const handlers: Record<string, (params: any) => unknown> = {
   "session/fork": ({ sessionId, cursorId }) => open(fork(sessionId, cursorId)),
   "session/list": ({ cwd }) => ({ sessions: list(cwd) }),
   "session/set_config_option": ({ sessionId, configId, value }) => {
-    const choices = options(sessionId).find((option) => option.id === configId)?.options ?? [];
-    if (!choices.some((choice) => choice.value === value)) throw failure(-32602, `No ${configId} ${value}`);
+    allow(sessionId, configId, value);
     append(sessionId, { [configId]: value });
     return { configOptions: options(sessionId) };
   },
