@@ -334,7 +334,7 @@ let typed = ""; // the prompt
 let cursor = 0; // where the cursor is in it
 let tabbed = ""; // what you typed, while Tab goes through what fits it
 let writing: { said: "thought" | "reply"; text: string; whole: boolean } | undefined; // what bee is thinking or saying
-let usage = ""; // how full its context is
+let usage = ""; // how full its context is: tokens used of its size
 let title = ""; // what the session is called
 let options: Option[] = []; // the session's settings
 let prompts = 0; // how many bee has not answered: a turn is under way while there are any
@@ -350,6 +350,8 @@ const forks = new Map<string, string>(); // what you said that a fork can begin 
 const unheard: string[] = []; // sent, and waiting for bee to hear it
 const queued: string[] = []; // waiting for the turn to end
 const history: string[] = []; // what you have said in the session, for Up to recall
+
+const count = new Intl.NumberFormat("en", { notation: "compact" }); // 512, 12K, 1.2M
 
 const busy = () => prompts > 0;
 
@@ -608,7 +610,7 @@ const updates: Record<string, (update: Update) => void> = {
     draw();
   },
   usage_update: ({ used, size }) => {
-    usage = `${Math.ceil((100 * used) / size)}%`;
+    usage = `${count.format(used)}/${count.format(size)}`;
     draw();
   },
   session_info_update: (update) => {
