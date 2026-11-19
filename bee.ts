@@ -758,9 +758,10 @@ function waiting(sid: string) {
 /**
  * Read what the user said, and while something waits for an answer, ask, run what it asks for, and again until it has
  * nothing to run and nothing more was said. A prompt that says nothing asks again what a turn failed or was stopped
- * before answering. A prompt sent during a turn joins it, and the model reads it once the commands it is running end. A reply is
- * written once its commands end, with what they returned. A request refused with what the commands returned is asked
- * again, with the refusal in its place. One that failed for now is asked again, the same, a few times, each later.
+ * before answering. A prompt sent during a turn joins it, and the model reads it once the commands it is running end. A
+ * reply is written once its commands end, with what they returned. A request refused with what the commands returned is
+ * asked again, with the refusal in its place. One that failed for now is asked again, the same, a few times, each
+ * later.
  */
 async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<string> {
   let results: Result[] = [];
