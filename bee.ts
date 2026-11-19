@@ -89,8 +89,11 @@ const result = (call: Call, content: Result["content"], failed: boolean): Result
 // OpenRouter, in OpenAI's Chat Completions.
 // Each lists the models it has, makes a request of the conversation, and a reply of the events it streams back.
 
-/** The thinking levels the APIs take, least first. A model has those its provider lists. */
-const LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+/**
+ * The thinking levels the APIs take: off, on at the model's own effort, then each effort, least first. A model has those
+ * its provider lists.
+ */
+const LEVELS = ["off", "on", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const CACHES = ["none", "short", "long"] as const;
 type Level = (typeof LEVELS)[number];
 type Cache = (typeof CACHES)[number];
@@ -524,9 +527,18 @@ const codex: Api = {
 const CONTINUED = ["text", "summary", "data"];
 
 /**
- * OpenRouter's Chat Completions. Its models are those it lists that take tools, each at the efforts it takes if it
- * reasons, else off. Its thinking is sealed as the reasoning details it streams; another's goes as its text. The prompt
- * and the conversation are each marked to be cached to their end, for the models it caches so.
+ * The levels an OpenRouter model takes: the efforts it lists, its "none" being off; else, if it reasons, on, and off
+ * unless it must reason; else off.
+ */
+const takes = ({ reasoning }: any): string[] =>
+  reasoning?.supported_efforts?.map((effort: string) => (effort === "none" ? "off" : effort)) ??
+  (reasoning ? [...(reasoning.mandatory ? [] : ["off"]), "on"] : ["off"]);
+
+/**
+ * OpenRouter's Chat Completions. Its models are those it lists that take tools, each at the levels it takes: off and on
+ * switch its reasoning, the rest are its effort. Its thinking is sealed as the reasoning details it streams; another's
+ * goes as its text. The prompt and the conversation are each marked to be cached to their end, for the models it caches
+ * so, and how the session began keeps it on the provider that holds its cache.
  */
 const openrouter: Api = {
   baseUrl: "https://openrouter.ai/api/v1",
@@ -535,18 +547,11 @@ const openrouter: Api = {
     (listing.data ?? [])
       .filter((listed: any) => listed.supported_parameters?.includes("tools"))
       .map((listed: any) => {
-        const reasons = listed.supported_parameters.includes("reasoning");
         const { id, name, context_length: contextWindow } = listed;
-        return {
-          id,
-          name,
-          contextWindow,
-          levels: reasons ? LEVELS.filter((level) => level !== "max") : ["off"],
-          listed,
-        };
+        return { id, name, contextWindow, levels: LEVELS.filter((level) => takes(listed).includes(level)), listed };
       }),
 
-  request(model, began, conversation, { thinking, cache }) {
+  request(model, began, conversation, { origin, thinking, cache }) {
     const mark =
       cache === "none" ? {} : { cache_control: { type: "ephemeral", ...(cache === "long" && { ttl: "1h" }) } };
     const media = (content: User["content"]) =>
@@ -571,29 +576,34 @@ const openrouter: Api = {
         type: "function",
         function: { name, arguments: JSON.stringify(input) },
       }));
-      const reasoning = of("thinking").flatMap(({ text, sealed }) => sealed ?? [{ type: "reasoning.text", text }]);
+      const sealed = of("thinking").flatMap((block) => block.sealed ?? []);
+      const unsealed = of("thinking")
+        .filter((block) => !block.sealed)
+        .map((block) => block.text)
+        .join("\n\n");
       return {
         role: "assistant",
         content: words || null,
         ...(calls.length && { tool_calls: calls }),
-        ...(reasoning.length && { reasoning_details: reasoning }),
+        ...(sealed.length && { reasoning_details: sealed }),
+        ...(unsealed && { reasoning: unsealed }),
       };
     };
     const messages = conversation.map(wire);
     Object.assign(messages.at(-1)?.content.at(-1) ?? {}, mark);
     return {
       url: `${model.baseUrl}/chat/completions`,
-      headers: { authorization: `Bearer ${model.apiKey}`, "x-title": "bee" },
+      headers: { authorization: `Bearer ${model.apiKey}` },
       body: {
         model: model.id,
         stream: true,
-        stream_options: { include_usage: true },
         messages: [{ role: "system", content: [{ type: "text", text: began.prompt, ...mark }] }, ...messages],
         tools: began.tools.map(({ name, description, parameters }) => ({
           type: "function",
           function: { name, description, parameters },
         })),
-        reasoning: { effort: thinking === "off" ? "none" : thinking },
+        reasoning: thinking === "off" || thinking === "on" ? { enabled: thinking === "on" } : { effort: thinking },
+        ...(cache !== "none" && { session_id: origin }),
       },
     };
   },
