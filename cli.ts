@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // bee in a terminal. It runs bee.ts and talks to it over ACP, as an editor would.
 import { spawn, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -858,12 +858,16 @@ const CLIPBOARDS = [
   ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"],
 ];
 
-/** Write the image copied to a file, and put its path in the prompt, as bee does with one an editor sends. */
+/**
+ * Write the image copied to a file named by what it holds, and put its path in the prompt, as bee does with one an
+ * editor sends.
+ */
 function paste() {
   for (const [command, ...args] of CLIPBOARDS) {
     const { status, stdout } = spawnSync(command, args);
     if (status !== 0 || !stdout.length) continue;
-    const path = join(tmpdir(), `bee-${randomUUID()}.png`);
+    const name = createHash("sha256").update(stdout).digest("hex").slice(0, 12);
+    const path = join(tmpdir(), `bee-${name}.png`);
     writeFileSync(path, stdout);
     return splice(cursor, cursor, (/\S$/.test(typed.slice(0, cursor)) ? " " : "") + path);
   }

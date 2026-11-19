@@ -2,7 +2,7 @@
 // bee: a minimal agent harness. ACP on stdio, one tool, one append-only file per session.
 import { isUtf8 } from "node:buffer";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import {
   closeSync,
@@ -1003,9 +1003,10 @@ function list(cwd?: string) {
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
-/** An image pasted, as a file the model can read: its path. */
+/** An image pasted, as a file the model can read, named by what it holds: its path. */
 function saved(bytes: Buffer, mimeType: string) {
-  const path = join(tmpdir(), `bee-${randomUUID()}.${mimeType.split("/")[1]}`);
+  const name = createHash("sha256").update(bytes).digest("hex").slice(0, 12);
+  const path = join(tmpdir(), `bee-${name}.${mimeType.split("/")[1]}`);
   writeFileSync(path, bytes);
   return path;
 }
