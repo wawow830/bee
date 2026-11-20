@@ -89,8 +89,9 @@ const result = (call: Call, content: Result["content"], failed: boolean): Result
 });
 
 // ── The APIs ────────────────────────────────────────────────────────────────
-// bee speaks to two providers itself, each in its API: Anthropic, in its Messages, and Codex, in OpenAI's Responses.
-// Each lists the models it has, makes a request of the conversation, and a reply of the events it streams back.
+// bee speaks to three providers itself, each in its API: Anthropic, in its Messages; Codex, in OpenAI's Responses; and
+// Google, in Gemini's. Each lists the models it has, makes a request of the conversation, and a reply of the events it
+// streams back.
 
 /** The thinking levels the APIs take, least first. A model has those its provider lists. */
 const LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -529,8 +530,155 @@ const codex: Api = {
   },
 };
 
+/** How a reply ends, by Gemini's reason: of itself, or cut at its longest. */
+const GEMINI_ENDS: Record<string, Reply["end"]> = { STOP: undefined, TOOL_USE: undefined, MAX_TOKENS: "cut" };
+
+/** The thinking levels Gemini takes, least first. */
+const GEMINI_LEVELS: Level[] = ["minimal", "low", "medium", "high", "xhigh"];
+
+/** Google's headers for a key. */
+const googleHeaders = (apiKey: string) => ({ "x-goog-api-key": apiKey });
+
+/**
+ * Google's Gemini. Its models are those it lists for replies. Gemini does not list which levels a model thinks at, so
+ * each offers all of them, and the API judges. A thought signature goes back on the part it came on; a call from
+ * another provider skips the check.
+ */
+const google: Api = {
+  baseUrl: "https://generativelanguage.googleapis.com",
+  listing: ({ baseUrl, apiKey }) => ({
+    url: `${baseUrl}/v1beta/models?pageSize=1000`,
+    headers: googleHeaders(apiKey),
+  }),
+  models: (listing) =>
+    (listing.models ?? [])
+      .filter((listed: any) => listed.supportedGenerationMethods?.includes("generateContent"))
+      .map((listed: any) => {
+        const id: string = listed.name.replace(/^models\//, "");
+        const { displayName: name = id, inputTokenLimit: contextWindow = 0 } = listed;
+        return { id, name, contextWindow, levels: GEMINI_LEVELS, listed };
+      }),
+
+  request(model, began, conversation, { thinking }) {
+    const names = new Map<string, string>();
+    const media = (content: User["content"]) =>
+      content
+        .filter((block) => block.type === "image" || block.text.trim())
+        .map((block) =>
+          block.type === "image"
+            ? { inlineData: { mimeType: block.mimeType, data: block.data } }
+            : { text: block.text },
+        );
+    const block = (said: Text | Thinking | Call, reply: Reply): object[] => {
+      const sig = native(reply, model) ? said.sealed : undefined;
+      if (said.type === "thinking") return sig ? [{ thought: true, text: said.text, thoughtSignature: sig }] : [];
+      if (said.type === "text")
+        return said.text.trim() || sig ? [{ text: said.text, ...(sig && { thoughtSignature: sig }) }] : [];
+      names.set(said.id, said.name);
+      const thoughtSignature = native(reply, model) ? sig : "skip_thought_signature_validator";
+      return [
+        {
+          functionCall: { id: callId(said.id), name: said.name, args: said.arguments },
+          ...(thoughtSignature && { thoughtSignature }),
+        },
+      ];
+    };
+    const wire = (said: Said): { role: string; parts: object[] } => {
+      if ("reply" in said)
+        return { role: "model", parts: said.reply.content.flatMap((each) => block(each, said.reply)) };
+      if ("user" in said) return { role: "user", parts: media(said.user.content) };
+      const { call, content, failed } = said.result;
+      const text = content
+        .filter((block): block is Text => block.type === "text")
+        .map((block) => block.text)
+        .join("\n");
+      const parts = content
+        .filter((block): block is Image => block.type === "image")
+        .map(({ mimeType, data }) => ({ inlineData: { mimeType, data } }));
+      const response = { [failed ? "error" : "output"]: text };
+      return {
+        role: "user",
+        parts: [
+          {
+            functionResponse: {
+              id: callId(call),
+              name: names.get(call) ?? BASH.name,
+              response,
+              ...(parts.length && { parts }),
+            },
+          },
+        ],
+      };
+    };
+    // One message for each turn of who speaks; tool results are in the user's.
+    const contents: { role: string; parts: object[] }[] = [];
+    for (const { role, parts } of conversation.map(wire).filter((turn) => turn.parts.length)) {
+      if (contents.at(-1)?.role === role) contents.at(-1)!.parts.push(...parts);
+      else contents.push({ role, parts });
+    }
+    return {
+      url: `${model.baseUrl}/v1beta/models/${model.id}:streamGenerateContent?alt=sse`,
+      headers: googleHeaders(model.apiKey),
+      body: {
+        systemInstruction: { parts: [{ text: began.prompt }] },
+        contents,
+        tools: [
+          {
+            functionDeclarations: began.tools.map(({ name, description, parameters }) => ({
+              name,
+              description,
+              parameters,
+            })),
+          },
+        ],
+        generationConfig: { thinkingConfig: { thinkingLevel: thinking, includeThoughts: true } },
+      },
+    };
+  },
+
+  async read(incoming, reply, tell) {
+    let stopped: string | undefined;
+    for await (const event of incoming) {
+      if (event.error) throw new Error(`${event.error.status ?? event.error.code}: ${event.error.message}`);
+      if (event.promptFeedback?.blockReason)
+        throw new Error(`The prompt was blocked: ${event.promptFeedback.blockReason}`);
+      if (event.usageMetadata) {
+        const {
+          promptTokenCount: input = 0,
+          candidatesTokenCount: out = 0,
+          thoughtsTokenCount: thought = 0,
+          cachedContentTokenCount: cacheRead = 0,
+        } = event.usageMetadata;
+        reply.usage = { input: Math.max(0, input - cacheRead), output: out + thought, cacheRead, cacheWrite: 0 };
+      }
+      const candidate = event.candidates?.[0];
+      for (const part of candidate?.content?.parts ?? []) {
+        const sig: string | undefined = part.thoughtSignature;
+        if (part.functionCall) {
+          const { id = randomUUID(), name, args = {} } = part.functionCall;
+          reply.content.push({ type: "call", id, name, arguments: args, ...(sig && { sealed: sig }) });
+          continue;
+        }
+        const kind = part.thought ? "thinking" : "text";
+        const text: string = part.text ?? "";
+        if (!text && !sig) continue;
+        const last = reply.content.at(-1);
+        if (last?.type === kind && !last.sealed) {
+          last.text += text;
+          if (sig) last.sealed = sig;
+        } else reply.content.push({ type: kind, text, ...(sig && { sealed: sig }) });
+        if (text) tell(kind, text);
+      }
+      if (candidate?.finishReason) stopped = candidate.finishReason;
+    }
+    if (!stopped) throw new Error("The stream ended before the reply did");
+    if (!(stopped in GEMINI_ENDS)) throw new Error(`The model stopped: ${stopped}`);
+    reply.end = GEMINI_ENDS[stopped];
+  },
+};
+
 /** The providers bee speaks to, by the names models.json gives them. */
-const PROVIDERS: Record<string, Api> = { anthropic, "openai-codex": codex };
+const PROVIDERS: Record<string, Api> = { anthropic, "openai-codex": codex, google };
 
 // ── Models ──────────────────────────────────────────────────────────────────
 
