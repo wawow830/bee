@@ -10,27 +10,30 @@ the model one tool, bash. A session is one append-only file.
 Point an ACP client at `bee.ts`. In T3 Code: **Settings → Providers → Add provider → Show more → Local ACP command**,
 with the path to `bee.ts` as the executable.
 
-Providers go in `~/.bee/agent/models.json`: `anthropic` and `openai-codex`.
+Providers go in `~/.bee/agent/models.json`: `anthropic`, `openai-codex` and `openrouter`.
 
 ```json
-{ "providers": { "anthropic": { "apiKey": "..." }, "openai-codex": { "apiKey": "...", "baseUrl": "https://..." } } }
+{ "providers": { "anthropic": { "apiKey": "..." }, "openrouter": { "apiKey": "...", "baseUrl": "https://..." } } }
 ```
 
-`baseUrl` is optional: without it, `https://api.anthropic.com` and `https://chatgpt.com/backend-api/codex`. The models
-are those each provider lists.
+`baseUrl` is optional: without it, `https://api.anthropic.com`, `https://chatgpt.com/backend-api/codex` and
+`https://openrouter.ai/api/v1`. The models are those each provider lists, and of OpenRouter's, those that take tools.
 
 | Variable   | Meaning                                               |
 | ---------- | ----------------------------------------------------- |
 | `BEE_HOME` | Where bee keeps its files. Without it, `~/.bee/agent` |
 
-Defaults go in `~/.bee/agent/settings.json`, and a session begins with them. Without it, the first model with a key,
-`medium`, and a five-minute cache:
+A session begins with the settings in `~/.bee/agent/settings.json`. bee chooses none itself, so it sets each:
 
 ```json
 { "model": "anthropic/claude-opus-5-5", "thinking": "high", "cache": "long" }
 ```
 
-Model, thinking and cache can be changed per session from the editor.
+Model, thinking and cache can be changed per session from the editor. A prompt is sent only with a model there is a key
+for, a thinking level it lists, and a cache of `none`, `short` (five minutes) or `long` (an hour); else it fails, saying
+which. What was said is sent to whichever provider is asked as it can read it: its own thinking, sealed as it gave it,
+and of another's what its API carries. Anthropic and Codex each carry only their own thinking; OpenRouter carries the
+text of another's. So a session can change provider, and change back to find its thinking as it was.
 
 ### In a terminal
 

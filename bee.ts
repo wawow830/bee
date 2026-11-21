@@ -43,7 +43,8 @@ function parse(line: string) {
 
 // ── Said ────────────────────────────────────────────────────────────────────
 // What a session's file holds: how it began, and what was said in it, by the user, a model and a command. What only a
-// model's provider can read is `sealed`, as the provider gave it: its thinking, and the ids it gave.
+// model's provider can read is `sealed`, as the provider gave it: its thinking, and the ids it gave. A provider is sent
+// what was said as it can read it: its own seals, and no other's. Each API carries of that what its wire can.
 
 type Text = { type: "text"; text: string; sealed?: any };
 type Image = { type: "image"; data: string; mimeType: string };
@@ -89,11 +90,15 @@ const result = (call: Call, content: Result["content"], failed: boolean): Result
 });
 
 // ── The APIs ────────────────────────────────────────────────────────────────
-// bee speaks to two providers itself, each in its API: Anthropic, in its Messages, and Codex, in OpenAI's Responses.
+// bee speaks to three providers itself, each in its API: Anthropic, in its Messages, Codex, in OpenAI's Responses, and
+// OpenRouter, in OpenAI's Chat Completions.
 // Each lists the models it has, makes a request of the conversation, and a reply of the events it streams back.
 
-/** The thinking levels the APIs take, least first. A model has those its provider lists. */
-const LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+/**
+ * The thinking levels the APIs take: off, on at the model's own effort, then each effort, least first. A model has those
+ * its provider lists.
+ */
+const LEVELS = ["off", "on", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const CACHES = ["none", "short", "long"] as const;
 type Level = (typeof LEVELS)[number];
 type Cache = (typeof CACHES)[number];
@@ -133,7 +138,7 @@ async function stream(model: Model, began: Began, said: Said[], chosen: Options,
   const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   const reply: Reply = { provider: model.provider, model: model.id, content: [], usage, timestamp: Date.now() };
   try {
-    const { url, headers, body } = api.request(model, began, sendable(said), chosen);
+    const { url, headers, body } = api.request(model, began, readable(sendable(said), model.provider), chosen);
     const response = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json", ...headers },
@@ -200,6 +205,14 @@ function sendable(conversation: Said[]): Said[] {
   return sent;
 }
 
+/** What was said, as a provider can read it: a seal is read only by the provider that made it. */
+const readable = (conversation: Said[], provider: string): Said[] =>
+  conversation.map((said) =>
+    "reply" in said && said.reply.provider !== provider
+      ? { reply: { ...said.reply, content: said.reply.content.map(({ sealed, ...block }) => block) } }
+      : said,
+  );
+
 /** What was said, as a request was refused with it: what a command returned is the refusal. */
 const refused = (said: Said, why: string): Said =>
   "result" in said
@@ -223,9 +236,6 @@ async function* events(body: ReadableStream<Uint8Array>) {
     }
   }
 }
-
-/** Whether a reply is of a model's provider, so its thinking and the ids it gave can be sent back to it. */
-const native = (reply: Reply, model: Model) => reply.provider === model.provider;
 
 /** A tool's result as one text, if it is only text. */
 const textual = (content: Result["content"]) =>
@@ -282,18 +292,17 @@ const anthropic: Api = {
             ? { type: "image", source: { type: "base64", media_type: block.mimeType, data: block.data } }
             : { type: "text", text: block.text },
         );
-    const block = (said: Text | Thinking | Call, reply: Reply): object[] => {
+    const block = (said: Text | Thinking | Call): object[] => {
       if (said.type === "text") return said.text.trim() ? [{ type: "text", text: said.text }] : [];
       if (said.type === "call")
         return [{ type: "tool_use", id: callId(said.id), name: said.name, input: said.arguments }];
-      if (!native(reply, model) || !said.sealed) return [];
+      if (!said.sealed) return []; // thinking it cannot verify, it does not take
       return said.redacted
         ? [{ type: "redacted_thinking", data: said.sealed }]
         : [{ type: "thinking", thinking: said.text, signature: said.sealed }];
     };
     const wire = (said: Said): { role: string; content: object[] } => {
-      if ("reply" in said)
-        return { role: "assistant", content: said.reply.content.flatMap((each) => block(each, said.reply)) };
+      if ("reply" in said) return { role: "assistant", content: said.reply.content.flatMap(block) };
       if ("user" in said) return { role: "user", content: media(said.user.content) };
       const { call, content, failed } = said.result;
       const answer = textual(content) ?? media(content);
@@ -434,9 +443,8 @@ const codex: Api = {
           ? { type: "input_text", text: block.text }
           : { type: "input_image", image_url: `data:${block.mimeType};base64,${block.data}` },
       );
-    const block = (said: Text | Thinking | Call, reply: Reply): object[] => {
-      const sealed = native(reply, model) && said.sealed;
-      if (said.type === "thinking") return sealed ? [sealed] : [];
+    const block = ({ sealed, ...said }: Text | Thinking | Call): object[] => {
+      if (said.type === "thinking") return sealed ? [sealed] : []; // reasoning is only its encrypted item
       if (said.type === "call") {
         const { id, name, arguments: input } = said;
         return [
@@ -455,7 +463,7 @@ const codex: Api = {
       return [{ type: "message", role: "assistant", content, status: "completed", ...sealed }];
     };
     const wire = (said: Said): object[] => {
-      if ("reply" in said) return said.reply.content.flatMap((each) => block(each, said.reply));
+      if ("reply" in said) return said.reply.content.flatMap(block);
       if ("user" in said) return [{ role: "user", content: media(said.user.content) }];
       const output = textual(said.result.content) ?? media(said.result.content);
       return [{ type: "function_call_output", call_id: callId(said.result.call), output }];
@@ -529,8 +537,142 @@ const codex: Api = {
   },
 };
 
+/** The fields of OpenRouter's reasoning details that a piece streamed continues. */
+const CONTINUED = ["text", "summary", "data"];
+
+/**
+ * The levels an OpenRouter model takes: the efforts it lists, its "none" being off; else, if it reasons, on, and off
+ * unless it must reason; else off.
+ */
+const takes = ({ reasoning }: any): string[] =>
+  reasoning?.supported_efforts?.map((effort: string) => (effort === "none" ? "off" : effort)) ??
+  (reasoning ? [...(reasoning.mandatory ? [] : ["off"]), "on"] : ["off"]);
+
+/**
+ * OpenRouter's Chat Completions. Its models are those it lists that take tools, each at the levels it takes: off and on
+ * switch its reasoning, the rest are its effort. Its thinking is sealed as the reasoning details it streams; another's
+ * goes as its text. The prompt and the conversation are each marked to be cached to their end, for the models it caches
+ * so, and how the session began keeps it on the provider that holds its cache.
+ */
+const openrouter: Api = {
+  baseUrl: "https://openrouter.ai/api/v1",
+  listing: ({ baseUrl, apiKey }) => ({ url: `${baseUrl}/models`, headers: { authorization: `Bearer ${apiKey}` } }),
+  models: (listing) =>
+    (listing.data ?? [])
+      .filter((listed: any) => listed.supported_parameters?.includes("tools"))
+      .map((listed: any) => {
+        const { id, name, context_length: contextWindow } = listed;
+        return { id, name, contextWindow, levels: LEVELS.filter((level) => takes(listed).includes(level)), listed };
+      }),
+
+  request(model, began, conversation, { origin, thinking, cache }) {
+    const mark =
+      cache === "none" ? {} : { cache_control: { type: "ephemeral", ...(cache === "long" && { ttl: "1h" }) } };
+    const media = (content: User["content"]) =>
+      content.map((block) =>
+        block.type === "text"
+          ? { type: "text", text: block.text }
+          : { type: "image_url", image_url: { url: `data:${block.mimeType};base64,${block.data}` } },
+      );
+    const wire = (said: Said): { role: string; content: any; [field: string]: unknown } => {
+      if ("user" in said) return { role: "user", content: media(said.user.content) };
+      if ("result" in said)
+        return { role: "tool", tool_call_id: callId(said.result.call), content: media(said.result.content) };
+      const of = <T extends Reply["content"][number]["type"]>(type: T) =>
+        said.reply.content.filter(
+          (block): block is Extract<Reply["content"][number], { type: T }> => block.type === type,
+        );
+      const words = of("text")
+        .map((block) => block.text)
+        .join("");
+      const calls = of("call").map(({ id, name, arguments: input }) => ({
+        id: callId(id),
+        type: "function",
+        function: { name, arguments: JSON.stringify(input) },
+      }));
+      const sealed = of("thinking").flatMap((block) => block.sealed ?? []);
+      const unsealed = of("thinking")
+        .filter((block) => !block.sealed)
+        .map((block) => block.text)
+        .join("\n\n");
+      return {
+        role: "assistant",
+        content: words || null,
+        ...(calls.length && { tool_calls: calls }),
+        ...(sealed.length && { reasoning_details: sealed }),
+        ...(unsealed && { reasoning: unsealed }),
+      };
+    };
+    const messages = conversation.map(wire);
+    Object.assign(messages.at(-1)?.content.at(-1) ?? {}, mark);
+    return {
+      url: `${model.baseUrl}/chat/completions`,
+      headers: { authorization: `Bearer ${model.apiKey}` },
+      body: {
+        model: model.id,
+        stream: true,
+        messages: [{ role: "system", content: [{ type: "text", text: began.prompt, ...mark }] }, ...messages],
+        tools: began.tools.map(({ name, description, parameters }) => ({
+          type: "function",
+          function: { name, description, parameters },
+        })),
+        reasoning: thinking === "off" || thinking === "on" ? { enabled: thinking === "on" } : { effort: thinking },
+        ...(cache !== "none" && { session_id: origin }),
+      },
+    };
+  },
+
+  async read(incoming, reply, tell) {
+    const begin = <T extends Reply["content"][number]>(block: T) => (reply.content.push(block), block);
+    let thinking: Thinking | undefined;
+    let text: Text | undefined;
+    const thought = () => (thinking ??= begin<Thinking>({ type: "thinking", text: "", sealed: [] }));
+    const said = () => (text ??= begin<Text>({ type: "text", text: "" }));
+    const calls: { call: Call; json: string }[] = []; // by the index the API gives each
+    let finished: string | undefined;
+    for await (const { error, usage, choices } of incoming) {
+      if (error) throw new Error(`${error.code}: ${error.message}`);
+      if (usage) {
+        const { prompt_tokens, completion_tokens: output, prompt_tokens_details: cached = {} } = usage;
+        const cacheRead = cached.cached_tokens ?? 0;
+        const cacheWrite = cached.cache_write_tokens ?? 0;
+        reply.usage = { input: prompt_tokens - cacheRead - cacheWrite, output, cacheRead, cacheWrite };
+      }
+      const { delta = {}, finish_reason } = choices?.[0] ?? {};
+      if (delta.reasoning) {
+        thought().text += delta.reasoning;
+        tell("thinking", delta.reasoning);
+      }
+      for (const piece of delta.reasoning_details ?? []) {
+        const { sealed } = thought();
+        const held = sealed.find((detail: any) => detail.index === piece.index) ?? sealed[sealed.push({}) - 1];
+        for (const [key, value] of Object.entries(piece))
+          held[key] = CONTINUED.includes(key) ? (held[key] ?? "") + value : value;
+      }
+      if (delta.content) {
+        said().text += delta.content;
+        tell("text", delta.content);
+      }
+      for (const piece of delta.tool_calls ?? []) {
+        const under = (calls[piece.index] ??= {
+          call: begin<Call>({ type: "call", id: "", name: "", arguments: {} }),
+          json: "",
+        });
+        under.call.id ||= piece.id ?? "";
+        under.call.name ||= piece.function?.name ?? "";
+        under.json += piece.function?.arguments ?? "";
+      }
+      finished = finish_reason ?? finished;
+    }
+    if (!finished) throw new Error("The stream ended before the reply did");
+    for (const { call, json } of calls.filter(Boolean)) call.arguments = JSON.parse(json || "{}");
+    if (!["stop", "tool_calls", "length"].includes(finished)) throw new Error(`The model stopped: ${finished}`);
+    reply.end = finished === "length" ? "cut" : undefined;
+  },
+};
+
 /** The providers bee speaks to, by the names models.json gives them. */
-const PROVIDERS: Record<string, Api> = { anthropic, "openai-codex": codex };
+const PROVIDERS: Record<string, Api> = { anthropic, "openai-codex": codex, openrouter };
 
 // ── Models ──────────────────────────────────────────────────────────────────
 
@@ -576,24 +718,19 @@ const providers = await Promise.all(
 );
 const available = providers.flat().sort((a, b) => byName(ref(a), ref(b)));
 
-/** The level a model has that is nearest the one asked for: it, or the nearest above, or else below. */
-function nearest(model: Model, level: Level) {
-  const at = LEVELS.indexOf(level);
-  return [...LEVELS.slice(at), ...LEVELS.slice(0, at).reverse()].find((one) => model.levels.includes(one))!;
-}
-
 // ── Sessions ────────────────────────────────────────────────────────────────
 // A session is a file of lines, written as things happen, each one thing: how it began, something said, a setting
 // chosen, or the session it was forked from. Lines are only appended, so every request begins with the last one, and
 // the provider's cache of it holds. The first line is how the session began: its directory, the prompt and the tools,
-// with the settings in settings.json. The file is made when the first thing is said in it. A reply that runs commands
-// is written with what they returned, in one write, so nothing comes between a command and its output, from any
-// editor. A fork is a session that begins as another did, up to where it parts from it: its file begins with the
-// other's lines up to there, then a line naming the session they are of, then the settings chosen after there, so it
-// is set as the other is.
+// with the settings in settings.json, which sets each. The file is made when the first thing is said in it. A reply
+// that runs commands is written with what they returned, in one write, so nothing comes between a command and its
+// output, from any editor. A fork is a session that begins as another did, up to where it parts from it: its file
+// begins with the other's lines up to there, then a line naming the session they are of, then the settings chosen after
+// there, so it is set as the other is.
 
 const SETTINGS = ["model", "thinking", "cache"] as const;
-type Settings = Partial<Record<(typeof SETTINGS)[number], string>>;
+type Setting = (typeof SETTINGS)[number];
+type Settings = Partial<Record<Setting, string>>;
 type Line = Settings & { began?: Began; user?: User; reply?: Reply; result?: Result; forked?: string };
 
 /** Whether a line is something said. */
@@ -625,16 +762,18 @@ function instructions(cwd: string) {
     .join("\n\n");
 }
 
-/** How a session begins. */
-const beginning = (cwd: string): Line => ({
-  ...JSON.parse(read(join(HOME, "settings.json"), "{}")),
-  began: {
+/** How a session begins: as settings.json sets it. bee sets nothing itself. */
+function beginning(cwd: string): Line {
+  const set: Settings = JSON.parse(read(join(HOME, "settings.json"), "{}"));
+  for (const setting of SETTINGS) if (!(setting in set)) throw failure(-32000, `settings.json sets no ${setting}`);
+  const began = {
     cwd,
     prompt: `\nYou are an agent in the bee harness.\n\n${instructions(cwd)}`.trimEnd(),
     tools: [BASH],
     timestamp: Date.now(),
-  },
-});
+  };
+  return { ...set, began };
+}
 
 /** The lines of each session nothing has been said in yet, held until the first thing said writes them. */
 const unborn = new Map<string, Line[]>();
@@ -694,18 +833,28 @@ const origin = (sid: string) => Bun.hash(JSON.stringify(lines(sid)[0])).toString
 /** What was said in a session. */
 const conversation = (sid: string): Said[] => lines(sid).filter(says);
 
-/**
- * For each setting, the latest line that makes sense holds. Without one, the model is the first there is a key for,
- * thinking is medium, and the prompt stays cached for five minutes. ("long" is an hour.)
- */
-function settings(sid: string) {
-  if (!available.length) throw failure(-32000, "No provider key is set.");
+/** What each setting is set to: what the latest line that sets it says. The first line sets each. */
+function chosen(sid: string) {
   const all = lines(sid);
-  const latest = <T>(pick: (line: Line) => T | undefined) => all.map(pick).findLast(Boolean);
-  const model = latest((line) => available.find((one) => ref(one) === line.model)) ?? available[0];
-  const level = latest((line) => LEVELS.find((level) => level === line.thinking)) ?? "medium";
-  const cache = latest((line) => CACHES.find((cache) => cache === line.cache)) ?? "short";
-  return { model, thinking: nearest(model, level), cache };
+  return Object.fromEntries(
+    SETTINGS.map((setting) => [setting, all.findLast((line) => setting in line)![setting]!]),
+  ) as Record<Setting, string>;
+}
+
+/** The model chosen, if there is a key for it. */
+const modelOf = (sid: string) => available.find((one) => ref(one) === chosen(sid).model);
+
+/** Fail unless a setting can be the value: one of its options. */
+function allow(sid: string, setting: string, value: string) {
+  const option = options(sid).find((option) => option.id === setting);
+  if (!option?.options.some((one) => one.value === value)) throw failure(-32602, `No ${setting} ${value}`);
+}
+
+/** The settings a request is made with, each as chosen. One that is not one of its options fails it. */
+function settings(sid: string) {
+  const set = chosen(sid);
+  for (const setting of SETTINGS) allow(sid, setting, set[setting]);
+  return { model: modelOf(sid)!, thinking: set.thinking as Level, cache: set.cache as Cache };
 }
 
 /**
@@ -917,9 +1066,9 @@ function describe(sid: string) {
   const all = lines(sid);
   const called = title(written(sid));
   const used = all.map((line) => (line.reply ? counted(line.reply.usage) : 0)).findLast(Boolean);
-  const size = settings(sid).model.contextWindow;
+  const size = modelOf(sid)?.contextWindow;
   if (called) update(sid, { sessionUpdate: "session_info_update", title: called });
-  if (used) update(sid, { sessionUpdate: "usage_update", used, size });
+  if (used && size) update(sid, { sessionUpdate: "usage_update", used, size });
 }
 
 /** How many tokens a request was, and its reply. */
@@ -978,13 +1127,18 @@ function replay(sid: string) {
   }
 }
 
-/** The settings, each as the editor changes it. Each one's id is its key in a line. */
+/**
+ * The settings, each as the editor changes it: as chosen, and its options: the models there is a key for, the levels
+ * the model chosen thinks at, and the caches. Each one's id is its key in a line.
+ */
 function options(sid: string) {
-  const { model, thinking, cache } = settings(sid);
+  const { model, thinking, cache } = chosen(sid);
   const models = available.map((one) => ({ value: ref(one), name: one.name }));
-  const [levels, caches] = [model.levels, CACHES].map((values) => values.map((value) => ({ value, name: value })));
+  const [levels, caches] = [modelOf(sid)?.levels ?? [], CACHES].map((values) =>
+    values.map((value) => ({ value, name: value })),
+  );
   return [
-    { id: "model", name: "Model", category: "model", currentValue: ref(model), options: models },
+    { id: "model", name: "Model", category: "model", currentValue: model, options: models },
     { id: "thinking", name: "Thinking", category: "thought_level", currentValue: thinking, options: levels },
     { id: "cache", name: "Cache", currentValue: cache, options: caches },
   ].map((option) => ({ type: "select", ...option }));
@@ -1054,8 +1208,7 @@ const handlers: Record<string, (params: any) => unknown> = {
   "session/fork": ({ sessionId, cursorId }) => open(fork(sessionId, cursorId)),
   "session/list": ({ cwd }) => ({ sessions: list(cwd) }),
   "session/set_config_option": ({ sessionId, configId, value }) => {
-    const choices = options(sessionId).find((option) => option.id === configId)?.options ?? [];
-    if (!choices.some((choice) => choice.value === value)) throw failure(-32602, `No ${configId} ${value}`);
+    allow(sessionId, configId, value);
     append(sessionId, { [configId]: value });
     return { configOptions: options(sessionId) };
   },
