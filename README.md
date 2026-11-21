@@ -10,20 +10,14 @@ the model one tool, bash. A session is one append-only file.
 Point an ACP client at `bee.ts`. In T3 Code: **Settings → Providers → Add provider → Show more → Local ACP command**,
 with the path to `bee.ts` as the executable.
 
-Providers go in `~/.bee/agent/models.json`: `anthropic`, `openai-codex` and `google`.
+Providers go in `~/.bee/agent/models.json`: `anthropic` and `openai-codex`.
 
 ```json
-{
-  "providers": {
-    "anthropic": { "apiKey": "..." },
-    "openai-codex": { "apiKey": "...", "baseUrl": "https://..." },
-    "google": { "apiKey": "..." }
-  }
-}
+{ "providers": { "anthropic": { "apiKey": "..." }, "openai-codex": { "apiKey": "...", "baseUrl": "https://..." } } }
 ```
 
-`baseUrl` is optional: without it, `https://api.anthropic.com`, `https://chatgpt.com/backend-api/codex` and
-`https://generativelanguage.googleapis.com`. The models are those each provider lists.
+`baseUrl` is optional: without it, `https://api.anthropic.com` and `https://chatgpt.com/backend-api/codex`. The models
+are those each provider lists.
 
 | Variable   | Meaning                                               |
 | ---------- | ----------------------------------------------------- |
