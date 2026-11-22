@@ -741,6 +741,7 @@ const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
 
 const SHOWN = 20_000; // characters of output the model sees per call
 const TIMEOUT = 120; // seconds a command runs before it is stopped
+const GRACE = 1; // seconds a command stopped has to end before it is killed
 
 const BASH = {
   name: "bash",
@@ -976,12 +977,21 @@ async function bash(sid: string, call: Call, signal: AbortSignal) {
   // Written to a file, not a pipe, so the call ends when the command does, whatever it left running.
   const path = join(tmpdir(), `bee-${randomUUID()}`);
   const out = openSync(path, "w");
-  // In its own process group, so an interrupt stops all of it.
+  // In its own process group, so an interrupt stops all of it: asked to end, and what is left once it has, or a moment
+  // later, killed.
   const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", out, out], detached: true });
+  const kill = (name: NodeJS.Signals) => {
+    try {
+      process.kill(-child.pid!, name);
+    } catch {} // a group that is gone is stopped
+  };
   // Stopped as the user stops it, at the timeout too.
   const timeout = AbortSignal.timeout(TIMEOUT * 1000);
   const stop = AbortSignal.any([signal, timeout]);
-  const interrupt = () => process.kill(-child.pid!, "SIGINT");
+  const interrupt = () => {
+    kill("SIGINT");
+    setTimeout(kill, GRACE * 1000, "SIGKILL").unref();
+  };
   stop.addEventListener("abort", interrupt);
   let cut = false;
   try {
@@ -1003,6 +1013,7 @@ async function bash(sid: string, call: Call, signal: AbortSignal) {
     return { content, failed: status !== 0 || !format };
   } finally {
     stop.removeEventListener("abort", interrupt);
+    if (stop.aborted) kill("SIGKILL");
     closeSync(out);
     if (!cut) rmSync(path);
   }
