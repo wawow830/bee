@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// bee: a minimal agent harness. ACP on stdio, one tool, one append-only file per session.
+// bee: minimal ACP agent harness over stdio with a single bash tool and append-only JSONL sessions.
 import { isUtf8 } from "node:buffer";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -24,16 +24,18 @@ import { createInterface } from "node:readline";
 import { setTimeout as sleep } from "node:timers/promises";
 import { version } from "./package.json";
 
-console.log = console.error; // stdout carries the protocol and nothing else
-
-/** An error the editor is told of, with its JSON-RPC code. */
-const failure = (code: number, message: string) => Object.assign(new Error(message), { code });
+// stdout is reserved for ACP JSON-RPC framing.
+console.log = console.error;
 
 const HOME = process.env.BEE_HOME ?? join(homedir(), ".bee", "agent");
-const read = (path: string, otherwise = "") => (existsSync(path) ? readFileSync(path, "utf8") : otherwise);
+const MODELS_FILE = join(HOME, "models.json");
+const CATALOG_DIR = join(HOME, "catalog");
+const SESSIONS_DIR = join(HOME, "sessions");
 
-/** A line as JSON. One that is not JSON is empty. */
-function parse(line: string) {
+const rpcError = (code: number, message: string) => Object.assign(new Error(message), { code });
+const readText = (path: string, fallback = "") => (existsSync(path) ? readFileSync(path, "utf8") : fallback);
+
+function parseJson(line: string) {
   try {
     return JSON.parse(line) ?? {};
   } catch {
@@ -41,190 +43,271 @@ function parse(line: string) {
   }
 }
 
-// ── Said ────────────────────────────────────────────────────────────────────
-// What a session's file holds: how it began, and what was said in it, by the user, a model and a command. What only a
-// model's provider can read is `sealed`, as the provider gave it: its thinking, and the ids it gave. A provider is sent
-// what was said as it can read it: its own seals, and no other's. Each API carries of that what its wire can.
+// ── Types ───────────────────────────────────────────────────────────────────
 
-type Text = { type: "text"; text: string; sealed?: any };
-type Image = { type: "image"; data: string; mimeType: string };
-type Thinking = { type: "thinking"; text: string; sealed?: any; redacted?: boolean };
-type Call = { type: "call"; id: string; name: string; arguments: Record<string, unknown>; sealed?: any };
-type Tool = { name: string; description: string; parameters: object };
+type TextBlock = { type: "text"; text: string; sealed?: any };
+type ImageBlock = { type: "image"; data: string; mimeType: string };
+type ThinkingBlock = { type: "thinking"; text: string; sealed?: any; redacted?: boolean };
+type ToolCall = { type: "call"; id: string; name: string; arguments: Record<string, unknown>; sealed?: any };
+type ToolSchema = { name: string; description: string; parameters: object };
 type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number };
 
-/** How the session began: where, the prompt, and the tools. */
-type Began = { cwd: string; prompt: string; tools: Tool[]; timestamp: number };
-type User = { content: (Text | Image)[]; timestamp: number };
-/**
- * What a model said. `end`: how it ended, if not of itself: cut at its longest, stopped, failed, or refused, the
- * request being refused as it was, so the same again would be refused again. `why`: the error it ended with, and
- * `status`: the HTTP status the provider answered it with, if it answered.
- */
-type Reply = {
+type SessionHeader = { cwd: string; prompt: string; tools: ToolSchema[]; timestamp: number };
+type UserMessage = { content: (TextBlock | ImageBlock)[]; timestamp: number };
+type AssistantReply = {
   provider: string;
   model: string;
-  content: (Text | Thinking | Call)[];
+  content: (TextBlock | ThinkingBlock | ToolCall)[];
   usage: Usage;
   timestamp: number;
   end?: "cut" | "stopped" | "failed" | "refused";
   why?: string;
   status?: number;
 };
-/** What a command returned, to the call that asked for it. */
-type Result = { call: string; content: (Text | Image)[]; failed: boolean; timestamp: number };
-/** What is said once the session has begun. */
-type Said = { user: User } | { reply: Reply } | { result: Result };
+type ToolResult = { call: string; content: (TextBlock | ImageBlock)[]; failed: boolean; timestamp: number };
+type MessageEntry = { user: UserMessage } | { reply: AssistantReply } | { result: ToolResult };
 
-/** What bee says in what a command returned, set apart from all the command wrote. */
-const bee = (words: string) => `(bee: ${words})`;
+const CONFIG_KEYS = ["model", "thinking", "cache"] as const;
+type ConfigKey = (typeof CONFIG_KEYS)[number];
+type ConfigValues = Partial<Record<ConfigKey, string>>;
+type SessionLine = ConfigValues & {
+  began?: SessionHeader;
+  user?: UserMessage;
+  reply?: AssistantReply;
+  result?: ToolResult;
+  forked?: string;
+};
 
-const user = (content: User["content"]): User => ({ content, timestamp: Date.now() });
-/** Whether content says nothing: no image, and no text but blanks. */
-const silent = (content: (Text | Image)[]) => content.every((block) => block.type === "text" && !block.text.trim());
-const result = (call: Call, content: Result["content"], failed: boolean): Result => ({
+const THINKING_LEVELS = ["off", "on", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const CACHE_MODES = ["none", "short", "long"] as const;
+type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+type CacheMode = (typeof CACHE_MODES)[number];
+
+type ProviderConfig = { apiKey: string; baseUrl: string };
+type ModelMeta = { id: string; name: string; contextWindow: number; levels: ThinkingLevel[]; listed: any };
+type Model = ModelMeta & ProviderConfig & { provider: string };
+type RequestOptions = { origin: string; thinking: ThinkingLevel; cache: CacheMode; signal: AbortSignal };
+type StreamCallback = (kind: "text" | "thinking", delta: string) => void;
+
+type ProviderApi = {
+  baseUrl: string;
+  listing(config: ProviderConfig): { url: string; headers: Record<string, string> };
+  models(payload: any): ModelMeta[];
+  request(
+    model: Model,
+    header: SessionHeader,
+    history: MessageEntry[],
+    options: RequestOptions,
+  ): { url: string; headers: Record<string, string>; body: object };
+  read(events: AsyncIterable<any>, reply: AssistantReply, onDelta: StreamCallback): Promise<void>;
+};
+
+const isMessageEntry = (line: SessionLine): line is SessionLine & MessageEntry =>
+  Boolean(line.user || line.reply || line.result);
+const isEmptyContent = (content: (TextBlock | ImageBlock)[]) =>
+  content.every((block) => block.type === "text" && !block.text.trim());
+const notice = (text: string) => `(bee: ${text})`;
+const makeUserMessage = (content: UserMessage["content"]): UserMessage => ({ content, timestamp: Date.now() });
+const makeToolResult = (call: ToolCall, content: ToolResult["content"], failed: boolean): ToolResult => ({
   call: call.id,
   content,
   failed,
   timestamp: Date.now(),
 });
 
-// ── The APIs ────────────────────────────────────────────────────────────────
-// bee speaks to three providers itself, each in its API: Anthropic, in its Messages, Codex, in OpenAI's Responses, and
-// OpenRouter, in OpenAI's Chat Completions.
-// Each lists the models it has, makes a request of the conversation, and a reply of the events it streams back.
+// ── Bash Tool ───────────────────────────────────────────────────────────────
 
-/**
- * The thinking levels the APIs take: off, on at the model's own effort, then each effort, least first. A model has those
- * its provider lists.
- */
-const LEVELS = ["off", "on", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-const CACHES = ["none", "short", "long"] as const;
-type Level = (typeof LEVELS)[number];
-type Cache = (typeof CACHES)[number];
+const MAX_OUTPUT_CHARS = 20_000;
+const DEFAULT_TIMEOUT = 30;
+const KILL_GRACE_MS = 1_000;
+const MAX_TIMER_MS = 0x7fffffff;
 
-/** A provider's key, and where it is. */
-type Key = { apiKey: string; baseUrl: string };
-
-/** A model as its provider lists it: its levels, least first, and `listed`, all the provider says of it. */
-type Listed = { id: string; name: string; contextWindow: number; levels: Level[]; listed: any };
-
-/** A model, with its provider's key. */
-type Model = Listed & Key & { provider: string };
-
-/** `origin`: how the session began, the same in each of its forks. Codex keeps its cache by it. */
-type Options = { origin: string; thinking: Level; cache: Cache; signal: AbortSignal };
-type Tell = (type: "text" | "thinking", words: string) => void;
-type Api = {
-  /** Where the provider is, unless models.json says. */
-  baseUrl: string;
-  /** How to ask the provider for its models. */
-  listing(key: Key): { url: string; headers: Record<string, string> };
-  /** The models in what it listed, each with its levels. */
-  models(listing: any): Listed[];
-  request(
-    model: Model,
-    began: Began,
-    said: Said[],
-    options: Options,
-  ): { url: string; headers: Record<string, string>; body: object };
-  /** Fills the reply as the events come, with how it ended if not of itself. A reply that fails throws. */
-  read(incoming: AsyncIterable<any>, reply: Reply, tell: Tell): Promise<void>;
+const BASH_TOOL: ToolSchema = {
+  name: "bash",
+  description:
+    "Run a shell command in the working directory. " +
+    `Output is truncated at ${MAX_OUTPUT_CHARS.toLocaleString("en")} characters (full output saved to a file), or returned as an image. ` +
+    `Default timeout is ${DEFAULT_TIMEOUT}s; pass timeout (seconds) for longer or shorter commands.`,
+  parameters: {
+    type: "object",
+    properties: {
+      command: { type: "string" },
+      timeout: { type: "number", description: "Timeout in seconds" },
+    },
+    required: ["command"],
+  },
 };
 
-/** One reply from a model, its words and thoughts told as they come. One that fails or is stopped says so. */
-async function stream(model: Model, began: Began, said: Said[], chosen: Options, tell: Tell): Promise<Reply> {
-  const api = PROVIDERS[model.provider];
-  const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-  const reply: Reply = { provider: model.provider, model: model.id, content: [], usage, timestamp: Date.now() };
-  try {
-    const { url, headers, body } = api.request(model, began, readable(sendable(said), model.provider), chosen);
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...headers },
-      body: JSON.stringify(body),
-      signal: chosen.signal,
-    });
-    const { status } = response;
-    if (!response.ok) throw Object.assign(new Error(`${status} ${await response.text()}`), { status });
-    await api.read(events(response.body!), reply, tell);
-  } catch (error: any) {
-    reply.end = chosen.signal.aborted ? "stopped" : REFUSALS.includes(error.status) ? "refused" : "failed";
-    reply.why = error.message;
-    reply.status = error.status;
-  }
-  return reply;
+const IMAGE_SIGNATURES: Record<string, RegExp> = {
+  "image/png": /^\x89PNG/,
+  "image/jpeg": /^\xff\xd8\xff/,
+  "image/gif": /^GIF8/,
+  "image/webp": /^RIFF....WEBP/s,
+};
+
+function truncateOutput(text: string, path: string) {
+  const cut = text.lastIndexOf("\n", MAX_OUTPUT_CHARS);
+  // Avoid splitting a UTF-16 surrogate pair at the slice boundary.
+  const shown = text.slice(0, cut > 0 ? cut : MAX_OUTPUT_CHARS).replace(/[\ud800-\udbff]$/, "");
+  const omitted = (text.length - shown.length).toLocaleString("en");
+  return `${shown}\n${notice(`${omitted} characters not shown, full output in ${path}`)}`;
 }
 
-/** The statuses of a request refused as it was: sent the same again, it would be refused again. */
-const REFUSALS = [400, 413];
+async function runBash(sid: string, call: ToolCall, signal: AbortSignal) {
+  const { command, timeout = DEFAULT_TIMEOUT } = call.arguments;
+  const { cwd } = sessionHeader(sid);
+  if (call.name !== BASH_TOOL.name) throw new Error("tool does not exist");
+  if (typeof command !== "string") throw new Error("command must be a string");
+  if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0)
+    throw new Error("timeout must be a positive number");
+  if (!existsSync(cwd)) throw new Error("working directory does not exist");
 
-/**
- * Whether a reply failed only for now: the provider did not answer, as the connection or its stream broke, or it
- * answered to ask later, as too many requests or its own failure.
- */
-const later = ({ end, status = 0 }: Reply) => end === "failed" && (!status || status === 429 || status >= 500);
+  // Redirect stdout/stderr to a file so detached child processes don't keep pipes open past shell exit.
+  const outPath = join(tmpdir(), `bee-${randomUUID()}`);
+  const outFd = openSync(outPath, "w");
+  const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", outFd, outFd], detached: true });
 
-/** How many times a reply that failed for now is asked again: after 1 second, then each time twice as long. */
-const TRIES = 6;
-
-/**
- * The conversation as an API takes it: a reply that failed or was stopped is left out, with what answered it, a call
- * nothing answered is answered as not run, and an answer that says nothing says so. An answer a request was refused
- * with, one sent since the last reply, is the refusal, so no session holds one every request after is refused for.
- */
-function sendable(conversation: Said[]): Said[] {
-  const sent: Said[] = [];
-  const unanswered = new Map<string, Call>();
-  let since = 0; // where what was sent since the last reply begins
-  const close = () => {
-    for (const call of unanswered.values())
-      sent.push({ result: result(call, [{ type: "text", text: bee("not run") }], true) });
-    unanswered.clear();
+  const killGroup = (sig: NodeJS.Signals) => {
+    try {
+      if (child.pid) process.kill(-child.pid, sig);
+    } catch {}
   };
-  for (const said of conversation) {
-    if ("result" in said) {
-      const { result } = said;
-      const answer = silent(result.content)
-        ? { result: { ...result, content: [{ type: "text" as const, text: bee("no output") }] } }
-        : said;
-      if (unanswered.delete(result.call)) sent.push(answer);
+
+  let timedOut = false;
+  let stopped = false;
+  let graceTimer: Timer | undefined;
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    killGroup("SIGINT");
+    graceTimer = setTimeout(() => killGroup("SIGKILL"), KILL_GRACE_MS);
+  };
+
+  const timeoutTimer = setTimeout(
+    () => {
+      timedOut = true;
+      stop();
+    },
+    Math.min(timeout * 1000, MAX_TIMER_MS),
+  );
+  signal.addEventListener("abort", stop, { once: true });
+  if (signal.aborted) stop();
+
+  let truncated = false;
+  try {
+    const [status] = await once(child, "exit");
+    const raw = readFileSync(outPath);
+    const magic = raw.subarray(0, 12).toString("latin1");
+    const format = isUtf8(raw)
+      ? "text"
+      : Object.keys(IMAGE_SIGNATURES).find((mime) => IMAGE_SIGNATURES[mime].test(magic));
+    const text = raw.toString("utf8").trimEnd();
+    truncated = format === "text" && text.length > MAX_OUTPUT_CHARS;
+
+    const suffix = timedOut ? notice(`timeout after ${timeout}s`) : "";
+    const withSuffix = (body: string): TextBlock => ({
+      type: "text",
+      text: [body, suffix].filter(Boolean).join("\n"),
+    });
+
+    const content: ToolResult["content"] =
+      format === "text"
+        ? [withSuffix(truncated ? truncateOutput(text, outPath) : text)]
+        : format
+          ? [{ type: "image", data: raw.toString("base64"), mimeType: format }, ...(suffix ? [withSuffix("")] : [])]
+          : [withSuffix(notice("output is of unsupported format"))];
+
+    return { content, failed: stopped || status !== 0 || !format };
+  } finally {
+    clearTimeout(timeoutTimer);
+    clearTimeout(graceTimer);
+    signal.removeEventListener("abort", stop);
+    // Reap any grandchildren left in the process group after cancel/timeout.
+    if (stopped) killGroup("SIGKILL");
+    closeSync(outFd);
+    if (!truncated) rmSync(outPath);
+  }
+}
+
+// ── Providers ───────────────────────────────────────────────────────────────
+
+const REFUSAL_STATUSES = [400, 413];
+const MAX_RETRIES = 6;
+
+const isRetryable = ({ end, status = 0 }: AssistantReply) =>
+  end === "failed" && (!status || status === 429 || status >= 500);
+
+const cacheControl = (cache: CacheMode) =>
+  cache === "none" ? {} : { cache_control: { type: "ephemeral", ...(cache === "long" && { ttl: "1h" }) } };
+
+const asPlainText = (content: ToolResult["content"]) =>
+  content.every((block): block is TextBlock => block.type === "text")
+    ? content.map((block) => block.text).join("\n")
+    : undefined;
+
+// Provider tool call IDs must match [\w-] and fit within 64 chars.
+const normalizeCallId = (id: string) => id.replace(/[^\w-]/g, "_").slice(0, 64);
+
+/**
+ * Prepare history for an LLM request: drop failed/stopped/refused replies and their orphaned results,
+ * synthesize `(bee: not run)` for unanswered tool calls, mark empty results with `(bee: no output)`,
+ * and replace tool results that triggered a 400/413 refusal with the error so the session can recover.
+ */
+function sanitizeHistory(history: MessageEntry[]): MessageEntry[] {
+  const out: MessageEntry[] = [];
+  const pendingCalls = new Map<string, ToolCall>();
+  let sinceLastReply = 0;
+
+  const closePending = () => {
+    for (const call of pendingCalls.values())
+      out.push({ result: makeToolResult(call, [{ type: "text", text: notice("not run") }], true) });
+    pendingCalls.clear();
+  };
+
+  for (const entry of history) {
+    if ("result" in entry) {
+      const { result } = entry;
+      const normalized = isEmptyContent(result.content)
+        ? { result: { ...result, content: [{ type: "text" as const, text: notice("no output") }] } }
+        : entry;
+      if (pendingCalls.delete(result.call)) out.push(normalized);
       continue;
     }
-    close();
-    if ("reply" in said) {
-      const { reply } = said;
-      if (reply.end === "refused") for (let n = since; n < sent.length; n++) sent[n] = refused(sent[n], reply.why!);
-      if (["failed", "stopped", "refused"].includes(reply.end!)) continue;
-      since = sent.length + 1;
-      for (const block of reply.content) if (block.type === "call") unanswered.set(block.id, block);
+    closePending();
+    if ("reply" in entry) {
+      const { reply } = entry;
+      if (reply.end === "refused") {
+        for (let i = sinceLastReply; i < out.length; i++) {
+          const item = out[i];
+          if ("result" in item)
+            out[i] = {
+              result: { ...item.result, content: [{ type: "text", text: notice(`provider refused: ${reply.why}`) }] },
+            };
+        }
+      }
+      if (reply.end === "failed" || reply.end === "stopped" || reply.end === "refused") continue;
+      sinceLastReply = out.length + 1;
+      for (const block of reply.content) if (block.type === "call") pendingCalls.set(block.id, block);
     }
-    sent.push(said);
+    out.push(entry);
   }
-  close();
-  return sent;
+  closePending();
+  return out;
 }
 
-/** What was said, as a provider can read it: a seal is read only by the provider that made it. */
-const readable = (conversation: Said[], provider: string): Said[] =>
-  conversation.map((said) =>
-    "reply" in said && said.reply.provider !== provider
-      ? { reply: { ...said.reply, content: said.reply.content.map(({ sealed, ...block }) => block) } }
-      : said,
+// Provider-specific sealed metadata (thinking signatures, item IDs) is only valid for the provider that issued it.
+const stripForeignSeals = (history: MessageEntry[], provider: string): MessageEntry[] =>
+  history.map((entry) =>
+    "reply" in entry && entry.reply.provider !== provider
+      ? { reply: { ...entry.reply, content: entry.reply.content.map(({ sealed, ...block }) => block) } }
+      : entry,
   );
 
-/** What was said, as a request was refused with it: what a command returned is the refusal. */
-const refused = (said: Said, why: string): Said =>
-  "result" in said
-    ? { result: { ...said.result, content: [{ type: "text", text: bee(`provider refused: ${why}`) }] } }
-    : said;
-
-/** The data of each event a server streams, as JSON. */
-async function* events(body: ReadableStream<Uint8Array>) {
+async function* parseSSE(body: ReadableStream<Uint8Array>) {
   const decoder = new TextDecoder();
   let buffer = "";
-  for await (const bytes of body) {
-    const frames = (buffer + decoder.decode(bytes, { stream: true })).replaceAll("\r\n", "\n").split("\n\n");
+  for await (const chunk of body) {
+    const frames = (buffer + decoder.decode(chunk, { stream: true })).replaceAll("\r\n", "\n").split("\n\n");
     buffer = frames.pop()!;
     for (const frame of frames) {
       const data = frame
@@ -237,17 +320,45 @@ async function* events(body: ReadableStream<Uint8Array>) {
   }
 }
 
-/** A tool's result as one text, if it is only text. */
-const textual = (content: Result["content"]) =>
-  content.every((block): block is Text => block.type === "text")
-    ? content.map((block) => block.text).join("\n")
-    : undefined;
+async function streamReply(
+  model: Model,
+  header: SessionHeader,
+  history: MessageEntry[],
+  options: RequestOptions,
+  onDelta: StreamCallback,
+): Promise<AssistantReply> {
+  const api = PROVIDERS[model.provider];
+  const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  const reply: AssistantReply = {
+    provider: model.provider,
+    model: model.id,
+    content: [],
+    usage,
+    timestamp: Date.now(),
+  };
+  try {
+    const prepared = stripForeignSeals(sanitizeHistory(history), model.provider);
+    const { url, headers, body } = api.request(model, header, prepared, options);
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify(body),
+      signal: options.signal,
+    });
+    const { status } = response;
+    if (!response.ok) throw Object.assign(new Error(`${status} ${await response.text()}`), { status });
+    await api.read(parseSSE(response.body!), reply, onDelta);
+  } catch (error: any) {
+    reply.end = options.signal.aborted ? "stopped" : REFUSAL_STATUSES.includes(error.status) ? "refused" : "failed";
+    reply.why = error.message;
+    reply.status = error.status;
+  }
+  return reply;
+}
 
-/** A tool call's id as an API takes it: letters, digits, _ and -, at most 64. */
-const callId = (id: string) => id.replace(/[^\w-]/g, "_").slice(0, 64);
+// Anthropic Messages API
 
-/** How a reply ends, by Anthropic's reason: of itself, or cut at its longest. */
-const ENDS: Record<string, Reply["end"]> = {
+const ANTHROPIC_STOP_REASONS: Record<string, AssistantReply["end"]> = {
   end_turn: undefined,
   pause_turn: undefined,
   stop_sequence: undefined,
@@ -255,36 +366,30 @@ const ENDS: Record<string, Reply["end"]> = {
   max_tokens: "cut",
 };
 
-/** Whether an Anthropic key is an OAuth token, which the API takes only from Claude Code. */
-const oauth = (apiKey: string) => apiKey.includes("sk-ant-oat");
+const isAnthropicOAuth = (apiKey: string) => apiKey.includes("sk-ant-oat");
 
-/** Anthropic's headers for a key. */
 const anthropicHeaders = (apiKey: string) => ({
   "anthropic-version": "2023-06-01",
-  ...(oauth(apiKey)
+  ...(isAnthropicOAuth(apiKey)
     ? { authorization: `Bearer ${apiKey}`, "anthropic-beta": "oauth-2025-04-20" }
     : { "x-api-key": apiKey }),
 });
 
-/**
- * Anthropic's Messages. A model thinks at the efforts it lists, and off if it lists that. The prompt with the tool, and
- * the conversation, are each cached to their end. An OAuth token is sent as Claude Code.
- */
-const anthropic: Api = {
+const anthropic: ProviderApi = {
   baseUrl: "https://api.anthropic.com",
   listing: ({ baseUrl, apiKey }) => ({ url: `${baseUrl}/v1/models?limit=1000`, headers: anthropicHeaders(apiKey) }),
-  models: (listing) =>
-    (listing.data ?? []).map((listed: any) => {
-      const { thinking, effort } = listed.capabilities;
-      const has = (level: Level) => (level === "off" ? thinking?.types?.disabled : effort?.[level])?.supported;
-      const { id, display_name: name, max_input_tokens: contextWindow } = listed;
-      return { id, name, contextWindow, levels: LEVELS.filter(has), listed };
+  models: (payload) =>
+    (payload.data ?? []).map((item: any) => {
+      const { thinking, effort } = item.capabilities;
+      const supports = (level: ThinkingLevel) =>
+        (level === "off" ? thinking?.types?.disabled : effort?.[level])?.supported;
+      const { id, display_name: name, max_input_tokens: contextWindow } = item;
+      return { id, name, contextWindow, levels: THINKING_LEVELS.filter(supports), listed: item };
     }),
 
-  request(model, began, conversation, { thinking, cache }) {
-    const mark =
-      cache === "none" ? {} : { cache_control: { type: "ephemeral", ...(cache === "long" && { ttl: "1h" }) } };
-    const media = (content: User["content"]) =>
+  request(model, header, history, { thinking, cache }) {
+    const mark = cacheControl(cache);
+    const encodeContent = (content: UserMessage["content"]) =>
       content
         .filter((block) => block.type === "image" || block.text.trim())
         .map((block) =>
@@ -292,37 +397,47 @@ const anthropic: Api = {
             ? { type: "image", source: { type: "base64", media_type: block.mimeType, data: block.data } }
             : { type: "text", text: block.text },
         );
-    const block = (said: Text | Thinking | Call): object[] => {
-      if (said.type === "text") return said.text.trim() ? [{ type: "text", text: said.text }] : [];
-      if (said.type === "call")
-        return [{ type: "tool_use", id: callId(said.id), name: said.name, input: said.arguments }];
-      if (!said.sealed) return []; // thinking it cannot verify, it does not take
-      return said.redacted
-        ? [{ type: "redacted_thinking", data: said.sealed }]
-        : [{ type: "thinking", thinking: said.text, signature: said.sealed }];
+    const encodeAssistantBlock = (block: TextBlock | ThinkingBlock | ToolCall): object[] => {
+      if (block.type === "text") return block.text.trim() ? [{ type: "text", text: block.text }] : [];
+      if (block.type === "call")
+        return [{ type: "tool_use", id: normalizeCallId(block.id), name: block.name, input: block.arguments }];
+      // Anthropic rejects thinking blocks without a valid signature.
+      if (!block.sealed) return [];
+      return block.redacted
+        ? [{ type: "redacted_thinking", data: block.sealed }]
+        : [{ type: "thinking", thinking: block.text, signature: block.sealed }];
     };
-    const wire = (said: Said): { role: string; content: object[] } => {
-      if ("reply" in said) return { role: "assistant", content: said.reply.content.flatMap(block) };
-      if ("user" in said) return { role: "user", content: media(said.user.content) };
-      const { call, content, failed } = said.result;
-      const answer = textual(content) ?? media(content);
+    const encodeEntry = (entry: MessageEntry): { role: string; content: object[] } => {
+      if ("reply" in entry) return { role: "assistant", content: entry.reply.content.flatMap(encodeAssistantBlock) };
+      if ("user" in entry) return { role: "user", content: encodeContent(entry.user.content) };
+      const { call, content, failed } = entry.result;
       return {
         role: "user",
-        content: [{ type: "tool_result", tool_use_id: callId(call), content: answer, is_error: failed }],
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: normalizeCallId(call),
+            content: asPlainText(content) ?? encodeContent(content),
+            is_error: failed,
+          },
+        ],
       };
     };
-    // One message for each turn of who speaks, the last cached to its end.
-    const dialogue: { role: string; content: object[] }[] = [];
-    for (const { role, content } of conversation.map(wire).filter((message) => message.content.length)) {
-      if (dialogue.at(-1)?.role === role) dialogue.at(-1)!.content.push(...content);
-      else dialogue.push({ role, content });
+
+    // Coalesce adjacent same-role turns (e.g. tool_result + steering user message) and cache up to the last block.
+    const messages: { role: string; content: object[] }[] = [];
+    for (const msg of history.map(encodeEntry).filter((m) => m.content.length)) {
+      if (messages.at(-1)?.role === msg.role) messages.at(-1)!.content.push(...msg.content);
+      else messages.push(msg);
     }
-    Object.assign(dialogue.at(-1)?.content.at(-1) ?? {}, mark);
-    const identity = { type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." };
+    Object.assign(messages.at(-1)?.content.at(-1) ?? {}, mark);
+
+    const claudeCodeIdentity = { type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." };
     const reasoning =
       thinking === "off"
         ? { thinking: { type: "disabled" } }
         : { thinking: { type: "adaptive", display: "summarized" }, output_config: { effort: thinking } };
+
     return {
       url: `${model.baseUrl}/v1/messages`,
       headers: anthropicHeaders(model.apiKey),
@@ -330,72 +445,75 @@ const anthropic: Api = {
         model: model.id,
         max_tokens: model.listed.max_tokens,
         stream: true,
-        system: [...(oauth(model.apiKey) ? [identity] : []), { type: "text", text: began.prompt, ...mark }],
-        tools: began.tools.map(({ name, description, parameters }) => ({
+        system: [
+          ...(isAnthropicOAuth(model.apiKey) ? [claudeCodeIdentity] : []),
+          { type: "text", text: header.prompt, ...mark },
+        ],
+        tools: header.tools.map(({ name, description, parameters }) => ({
           name,
           description,
           input_schema: parameters,
         })),
-        messages: dialogue,
+        messages,
         ...reasoning,
       },
     };
   },
 
-  async read(incoming, reply, tell) {
-    const underway = new Map<number, { block: any; json: string }>(); // by the index the API gives it
-    let stopped: { stop_reason?: string; stop_details?: { explanation?: string } } = {};
-    const count = (counts: any = {}) => {
-      const counted = reply.usage;
-      counted.input = counts.input_tokens ?? counted.input;
-      counted.output = counts.output_tokens ?? counted.output;
-      counted.cacheRead = counts.cache_read_input_tokens ?? counted.cacheRead;
-      counted.cacheWrite = counts.cache_creation_input_tokens ?? counted.cacheWrite;
+  async read(events, reply, onDelta) {
+    const openBlocks = new Map<number, { block: any; json: string }>();
+    let stopDelta: { stop_reason?: string; stop_details?: { explanation?: string } } = {};
+    const mergeUsage = (u: any = {}) => {
+      reply.usage.input = u.input_tokens ?? reply.usage.input;
+      reply.usage.output = u.output_tokens ?? reply.usage.output;
+      reply.usage.cacheRead = u.cache_read_input_tokens ?? reply.usage.cacheRead;
+      reply.usage.cacheWrite = u.cache_creation_input_tokens ?? reply.usage.cacheWrite;
     };
-    /** A block as it starts, as bee keeps it. */
-    const started = (block: any): Reply["content"][number] | undefined => {
-      if (block.type === "text") return { type: "text", text: block.text };
-      if (block.type === "thinking") return { type: "thinking", text: block.thinking, sealed: block.signature };
-      if (block.type === "redacted_thinking") return { type: "thinking", text: "", sealed: block.data, redacted: true };
-      if (block.type === "tool_use") return { type: "call", id: block.id, name: block.name, arguments: {} };
+    const createBlock = (raw: any): AssistantReply["content"][number] | undefined => {
+      if (raw.type === "text") return { type: "text", text: raw.text };
+      if (raw.type === "thinking") return { type: "thinking", text: raw.thinking, sealed: raw.signature };
+      if (raw.type === "redacted_thinking") return { type: "thinking", text: "", sealed: raw.data, redacted: true };
+      if (raw.type === "tool_use") return { type: "call", id: raw.id, name: raw.name, arguments: {} };
     };
-    for await (const event of incoming) {
+
+    for await (const event of events) {
       const { delta } = event;
-      const under = underway.get(event.index);
+      const open = openBlocks.get(event.index);
       switch (event.type) {
         case "error":
           throw new Error(`${event.error.type}: ${event.error.message}`);
         case "message_start":
-          count(event.message.usage);
+          mergeUsage(event.message.usage);
           break;
         case "content_block_start": {
-          const block = started(event.content_block);
+          const block = createBlock(event.content_block);
           if (!block) break;
-          underway.set(event.index, { block, json: "" });
+          openBlocks.set(event.index, { block, json: "" });
           reply.content.push(block);
           break;
         }
         case "content_block_delta":
-          if (!under) break;
+          if (!open) break;
           if (delta.type === "text_delta" || delta.type === "thinking_delta") {
-            under.block.text += delta.text ?? delta.thinking;
-            tell(under.block.type, delta.text ?? delta.thinking);
+            const chunk = delta.text ?? delta.thinking;
+            open.block.text += chunk;
+            onDelta(open.block.type, chunk);
           }
-          if (delta.type === "signature_delta") under.block.sealed = (under.block.sealed ?? "") + delta.signature;
-          if (delta.type === "input_json_delta") under.json += delta.partial_json;
+          if (delta.type === "signature_delta") open.block.sealed = (open.block.sealed ?? "") + delta.signature;
+          if (delta.type === "input_json_delta") open.json += delta.partial_json;
           break;
         case "content_block_stop":
-          if (under?.block.type === "call") under.block.arguments = JSON.parse(under.json || "{}");
-          underway.delete(event.index);
+          if (open?.block.type === "call") open.block.arguments = JSON.parse(open.json || "{}");
+          openBlocks.delete(event.index);
           break;
         case "message_delta":
-          stopped = delta;
-          count(event.usage);
+          stopDelta = delta;
+          mergeUsage(event.usage);
           break;
         case "message_stop":
-          if (!(stopped.stop_reason! in ENDS))
-            throw new Error(stopped.stop_details?.explanation ?? `The model stopped: ${stopped.stop_reason}`);
-          reply.end = ENDS[stopped.stop_reason!];
+          if (!(stopDelta.stop_reason! in ANTHROPIC_STOP_REASONS))
+            throw new Error(stopDelta.stop_details?.explanation ?? `The model stopped: ${stopDelta.stop_reason}`);
+          reply.end = ANTHROPIC_STOP_REASONS[stopDelta.stop_reason!];
           return;
       }
     }
@@ -403,71 +521,70 @@ const anthropic: Api = {
   },
 };
 
-/** The ChatGPT account a Codex token is for. */
-function account(token: string): string {
+// OpenAI Codex Responses API
+
+function extractAccountId(jwt: string): string {
   try {
-    const claims = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString());
+    const claims = JSON.parse(Buffer.from(jwt.split(".")[1], "base64url").toString());
     const id = claims["https://api.openai.com/auth"].chatgpt_account_id;
     if (typeof id === "string") return id;
   } catch {}
   throw new Error("The key is not a ChatGPT token: it names no account.");
 }
 
-/** Codex's headers for a key. */
-const codexHeaders = (apiKey: string) => ({ authorization: `Bearer ${apiKey}`, "chatgpt-account-id": account(apiKey) });
+const codexHeaders = (apiKey: string) => ({
+  authorization: `Bearer ${apiKey}`,
+  "chatgpt-account-id": extractAccountId(apiKey),
+});
 
-/**
- * OpenAI's Responses, as Codex takes them. Its models are those it lists to be shown, at the efforts each lists. It
- * lists a model only to a client as new as the model asks, so bee says it is newer than any. How the session began is
- * the cache's key, so a fork begins cached.
- */
-const codex: Api = {
+const codex: ProviderApi = {
   baseUrl: "https://chatgpt.com/backend-api/codex",
+  // client_version=999.0.0 ensures the backend doesn't gate newer models behind CLI version checks.
   listing: ({ baseUrl, apiKey }) => ({
     url: `${baseUrl}/models?client_version=999.0.0`,
     headers: codexHeaders(apiKey),
   }),
-  models: (listing) =>
-    (listing.models ?? [])
-      .filter((listed: any) => listed.visibility === "list")
-      .map((listed: any) => {
-        const efforts = listed.supported_reasoning_levels.map((level: any) => level.effort);
-        const { slug: id, display_name: name, context_window: contextWindow } = listed;
-        return { id, name, contextWindow, levels: LEVELS.filter((level) => efforts.includes(level)), listed };
+  models: (payload) =>
+    (payload.models ?? [])
+      .filter((item: any) => item.visibility === "list")
+      .map((item: any) => {
+        const efforts = item.supported_reasoning_levels.map((level: any) => level.effort);
+        const { slug: id, display_name: name, context_window: contextWindow } = item;
+        return { id, name, contextWindow, levels: THINKING_LEVELS.filter((l) => efforts.includes(l)), listed: item };
       }),
 
-  request(model, began, conversation, { origin, thinking, cache }) {
-    const media = (content: User["content"]) =>
+  request(model, header, history, { origin, thinking, cache }) {
+    const encodeContent = (content: UserMessage["content"]) =>
       content.map((block) =>
         block.type === "text"
           ? { type: "input_text", text: block.text }
           : { type: "input_image", image_url: `data:${block.mimeType};base64,${block.data}` },
       );
-    const block = ({ sealed, ...said }: Text | Thinking | Call): object[] => {
-      if (said.type === "thinking") return sealed ? [sealed] : []; // reasoning is only its encrypted item
-      if (said.type === "call") {
-        const { id, name, arguments: input } = said;
+    const encodeAssistantBlock = ({ sealed, ...block }: TextBlock | ThinkingBlock | ToolCall): object[] => {
+      if (block.type === "thinking") return sealed ? [sealed] : [];
+      if (block.type === "call") {
         return [
           {
             type: "function_call",
             ...(sealed && { id: sealed }),
-            call_id: callId(id),
-            name,
-            arguments: JSON.stringify(input),
+            call_id: normalizeCallId(block.id),
+            name: block.name,
+            arguments: JSON.stringify(block.arguments),
           },
         ];
       }
-      if (!said.text.trim()) return [];
-      if (!sealed) return [{ role: "assistant", content: said.text }];
-      const content = [{ type: "output_text", text: said.text, annotations: [] }];
+      if (!block.text.trim()) return [];
+      if (!sealed) return [{ role: "assistant", content: block.text }];
+      const content = [{ type: "output_text", text: block.text, annotations: [] }];
       return [{ type: "message", role: "assistant", content, status: "completed", ...sealed }];
     };
-    const wire = (said: Said): object[] => {
-      if ("reply" in said) return said.reply.content.flatMap(block);
-      if ("user" in said) return [{ role: "user", content: media(said.user.content) }];
-      const output = textual(said.result.content) ?? media(said.result.content);
-      return [{ type: "function_call_output", call_id: callId(said.result.call), output }];
+    const encodeEntry = (entry: MessageEntry): object[] => {
+      if ("reply" in entry) return entry.reply.content.flatMap(encodeAssistantBlock);
+      if ("user" in entry) return [{ role: "user", content: encodeContent(entry.user.content) }];
+      const output = asPlainText(entry.result.content) ?? encodeContent(entry.result.content);
+      return [{ type: "function_call_output", call_id: normalizeCallId(entry.result.call), output }];
     };
+
     return {
       url: `${model.baseUrl}/responses`,
       headers: {
@@ -481,9 +598,9 @@ const codex: Api = {
         model: model.id,
         store: false,
         stream: true,
-        instructions: began.prompt,
-        input: conversation.flatMap(wire),
-        tools: began.tools.map(({ name, description, parameters }) => ({
+        instructions: header.prompt,
+        input: history.flatMap(encodeEntry),
+        tools: header.tools.map(({ name, description, parameters }) => ({
           type: "function",
           name,
           description,
@@ -496,9 +613,8 @@ const codex: Api = {
     };
   },
 
-  async read(incoming, reply, tell) {
-    /** An item as it is done, as bee keeps it. */
-    const done = (item: any): Reply["content"][number] | undefined => {
+  async read(events, reply, onDelta) {
+    const parseItem = (item: any): AssistantReply["content"][number] | undefined => {
       if (item.type === "reasoning")
         return { type: "thinking", text: item.summary.map((part: any) => part.text).join("\n\n"), sealed: item };
       if (item.type === "message") {
@@ -510,15 +626,16 @@ const codex: Api = {
         return { type: "call", id, name, arguments: JSON.parse(input || "{}"), sealed: item.id };
       }
     };
-    for await (const event of incoming) {
+
+    for await (const event of events) {
       const { type, delta, item, response } = event;
       if (type === "error") throw new Error(`${event.code}: ${event.message}`);
       if (type === "response.failed") throw new Error(`${response.error?.code}: ${response.error?.message}`);
-      if (type === "response.output_text.delta") tell("text", delta);
-      if (type === "response.reasoning_summary_text.delta") tell("thinking", delta);
-      if (type === "response.reasoning_summary_part.done") tell("thinking", "\n\n");
+      if (type === "response.output_text.delta") onDelta("text", delta);
+      if (type === "response.reasoning_summary_text.delta") onDelta("thinking", delta);
+      if (type === "response.reasoning_summary_part.done") onDelta("thinking", "\n\n");
       if (type === "response.output_item.done") {
-        const block = done(item);
+        const block = parseItem(item);
         if (block) reply.content.push(block);
       }
       if (type === "response.completed" || type === "response.incomplete") {
@@ -537,82 +654,78 @@ const codex: Api = {
   },
 };
 
-/** The fields of OpenRouter's reasoning details that a piece streamed continues. */
-const CONTINUED = ["text", "summary", "data"];
+// OpenRouter Chat Completions API
 
-/**
- * The levels an OpenRouter model takes: the efforts it lists, its "none" being off; else, if it reasons, on, and off
- * unless it must reason; else off.
- */
-const takes = ({ reasoning }: any): string[] =>
+const APPENDED_REASONING_FIELDS = ["text", "summary", "data"];
+
+const openRouterLevels = ({ reasoning }: any): string[] =>
   reasoning?.supported_efforts?.map((effort: string) => (effort === "none" ? "off" : effort)) ??
   (reasoning ? [...(reasoning.mandatory ? [] : ["off"]), "on"] : ["off"]);
 
-/**
- * OpenRouter's Chat Completions. Its models are those it lists that take tools, each at the levels it takes: off and on
- * switch its reasoning, the rest are its effort. Its thinking is sealed as the reasoning details it streams; another's
- * goes as its text. The prompt and the conversation are each marked to be cached to their end, for the models it caches
- * so, and how the session began keeps it on the provider that holds its cache.
- */
-const openrouter: Api = {
+const openrouter: ProviderApi = {
   baseUrl: "https://openrouter.ai/api/v1",
   listing: ({ baseUrl, apiKey }) => ({ url: `${baseUrl}/models`, headers: { authorization: `Bearer ${apiKey}` } }),
-  models: (listing) =>
-    (listing.data ?? [])
-      .filter((listed: any) => listed.supported_parameters?.includes("tools"))
-      .map((listed: any) => {
-        const { id, name, context_length: contextWindow } = listed;
-        return { id, name, contextWindow, levels: LEVELS.filter((level) => takes(listed).includes(level)), listed };
+  models: (payload) =>
+    (payload.data ?? [])
+      .filter((item: any) => item.supported_parameters?.includes("tools"))
+      .map((item: any) => {
+        const { id, name, context_length: contextWindow } = item;
+        const supported = openRouterLevels(item);
+        return { id, name, contextWindow, levels: THINKING_LEVELS.filter((l) => supported.includes(l)), listed: item };
       }),
 
-  request(model, began, conversation, { origin, thinking, cache }) {
-    const mark =
-      cache === "none" ? {} : { cache_control: { type: "ephemeral", ...(cache === "long" && { ttl: "1h" }) } };
-    const media = (content: User["content"]) =>
+  request(model, header, history, { origin, thinking, cache }) {
+    const mark = cacheControl(cache);
+    const encodeContent = (content: UserMessage["content"]) =>
       content.map((block) =>
         block.type === "text"
           ? { type: "text", text: block.text }
           : { type: "image_url", image_url: { url: `data:${block.mimeType};base64,${block.data}` } },
       );
-    const wire = (said: Said): { role: string; content: any; [field: string]: unknown } => {
-      if ("user" in said) return { role: "user", content: media(said.user.content) };
-      if ("result" in said)
-        return { role: "tool", tool_call_id: callId(said.result.call), content: media(said.result.content) };
-      const of = <T extends Reply["content"][number]["type"]>(type: T) =>
-        said.reply.content.filter(
-          (block): block is Extract<Reply["content"][number], { type: T }> => block.type === type,
+    const encodeEntry = (entry: MessageEntry): { role: string; content: any; [key: string]: unknown } => {
+      if ("user" in entry) return { role: "user", content: encodeContent(entry.user.content) };
+      if ("result" in entry)
+        return {
+          role: "tool",
+          tool_call_id: normalizeCallId(entry.result.call),
+          content: encodeContent(entry.result.content),
+        };
+      const ofType = <T extends AssistantReply["content"][number]["type"]>(type: T) =>
+        entry.reply.content.filter(
+          (block): block is Extract<AssistantReply["content"][number], { type: T }> => block.type === type,
         );
-      const words = of("text")
+      const text = ofType("text")
         .map((block) => block.text)
         .join("");
-      const calls = of("call").map(({ id, name, arguments: input }) => ({
-        id: callId(id),
+      const toolCalls = ofType("call").map(({ id, name, arguments: input }) => ({
+        id: normalizeCallId(id),
         type: "function",
         function: { name, arguments: JSON.stringify(input) },
       }));
-      const sealed = of("thinking").flatMap((block) => block.sealed ?? []);
-      const unsealed = of("thinking")
+      const sealedReasoning = ofType("thinking").flatMap((block) => block.sealed ?? []);
+      const plainReasoning = ofType("thinking")
         .filter((block) => !block.sealed)
         .map((block) => block.text)
         .join("\n\n");
       return {
         role: "assistant",
-        content: words || null,
-        ...(calls.length && { tool_calls: calls }),
-        ...(sealed.length && { reasoning_details: sealed }),
-        ...(unsealed && { reasoning: unsealed }),
+        content: text || null,
+        ...(toolCalls.length && { tool_calls: toolCalls }),
+        ...(sealedReasoning.length && { reasoning_details: sealedReasoning }),
+        ...(plainReasoning && { reasoning: plainReasoning }),
       };
     };
-    const messages = conversation.map(wire);
-    Object.assign(messages.at(-1)?.content.at(-1) ?? {}, mark);
+
+    const messages = history.map(encodeEntry);
+    Object.assign(messages.at(-1)?.content?.at?.(-1) ?? {}, mark);
     return {
       url: `${model.baseUrl}/chat/completions`,
       headers: { authorization: `Bearer ${model.apiKey}` },
       body: {
         model: model.id,
         stream: true,
-        messages: [{ role: "system", content: [{ type: "text", text: began.prompt, ...mark }] }, ...messages],
-        tools: began.tools.map(({ name, description, parameters }) => ({
+        messages: [{ role: "system", content: [{ type: "text", text: header.prompt, ...mark }] }, ...messages],
+        tools: header.tools.map(({ name, description, parameters }) => ({
           type: "function",
           function: { name, description, parameters },
         })),
@@ -622,15 +735,16 @@ const openrouter: Api = {
     };
   },
 
-  async read(incoming, reply, tell) {
-    const begin = <T extends Reply["content"][number]>(block: T) => (reply.content.push(block), block);
-    let thinking: Thinking | undefined;
-    let text: Text | undefined;
-    const thought = () => (thinking ??= begin<Thinking>({ type: "thinking", text: "", sealed: [] }));
-    const said = () => (text ??= begin<Text>({ type: "text", text: "" }));
-    const calls: { call: Call; json: string }[] = []; // by the index the API gives each
-    let finished: string | undefined;
-    for await (const { error, usage, choices } of incoming) {
+  async read(events, reply, onDelta) {
+    const pushBlock = <T extends AssistantReply["content"][number]>(block: T) => (reply.content.push(block), block);
+    let thinking: ThinkingBlock | undefined;
+    let text: TextBlock | undefined;
+    const ensureThinking = () => (thinking ??= pushBlock<ThinkingBlock>({ type: "thinking", text: "", sealed: [] }));
+    const ensureText = () => (text ??= pushBlock<TextBlock>({ type: "text", text: "" }));
+    const openCalls: { call: ToolCall; json: string }[] = [];
+    let finishReason: string | undefined;
+
+    for await (const { error, usage, choices } of events) {
       if (error) throw new Error(`${error.code}: ${error.message}`);
       if (usage) {
         const { prompt_tokens, completion_tokens: output, prompt_tokens_details: cached = {} } = usage;
@@ -640,561 +754,427 @@ const openrouter: Api = {
       }
       const { delta = {}, finish_reason } = choices?.[0] ?? {};
       if (delta.reasoning) {
-        thought().text += delta.reasoning;
-        tell("thinking", delta.reasoning);
+        ensureThinking().text += delta.reasoning;
+        onDelta("thinking", delta.reasoning);
       }
       for (const piece of delta.reasoning_details ?? []) {
-        const { sealed } = thought();
-        const held = sealed.find((detail: any) => detail.index === piece.index) ?? sealed[sealed.push({}) - 1];
+        const { sealed } = ensureThinking();
+        let detail = sealed.find((entry: any) => entry.index === piece.index);
+        if (!detail) sealed.push((detail = {}));
         for (const [key, value] of Object.entries(piece))
-          held[key] = CONTINUED.includes(key) ? (held[key] ?? "") + value : value;
+          detail[key] = APPENDED_REASONING_FIELDS.includes(key) ? (detail[key] ?? "") + value : value;
       }
       if (delta.content) {
-        said().text += delta.content;
-        tell("text", delta.content);
+        ensureText().text += delta.content;
+        onDelta("text", delta.content);
       }
       for (const piece of delta.tool_calls ?? []) {
-        const under = (calls[piece.index] ??= {
-          call: begin<Call>({ type: "call", id: "", name: "", arguments: {} }),
+        const entry = (openCalls[piece.index] ??= {
+          call: pushBlock<ToolCall>({ type: "call", id: "", name: "", arguments: {} }),
           json: "",
         });
-        under.call.id ||= piece.id ?? "";
-        under.call.name ||= piece.function?.name ?? "";
-        under.json += piece.function?.arguments ?? "";
+        entry.call.id ||= piece.id ?? "";
+        entry.call.name ||= piece.function?.name ?? "";
+        entry.json += piece.function?.arguments ?? "";
       }
-      finished = finish_reason ?? finished;
+      finishReason = finish_reason ?? finishReason;
     }
-    if (!finished) throw new Error("The stream ended before the reply did");
-    for (const { call, json } of calls.filter(Boolean)) call.arguments = JSON.parse(json || "{}");
-    if (!["stop", "tool_calls", "length"].includes(finished)) throw new Error(`The model stopped: ${finished}`);
-    reply.end = finished === "length" ? "cut" : undefined;
+
+    if (!finishReason) throw new Error("The stream ended before the reply did");
+    for (const { call, json } of openCalls.filter(Boolean)) call.arguments = JSON.parse(json || "{}");
+    if (!["stop", "tool_calls", "length"].includes(finishReason)) throw new Error(`The model stopped: ${finishReason}`);
+    reply.end = finishReason === "length" ? "cut" : undefined;
   },
 };
 
-/** The providers bee speaks to, by the names models.json gives them. */
-const PROVIDERS: Record<string, Api> = { anthropic, "openai-codex": codex, openrouter };
+const PROVIDERS: Record<string, ProviderApi> = { anthropic, "openai-codex": codex, openrouter };
 
-// ── Models ──────────────────────────────────────────────────────────────────
+// ── Model Catalog ───────────────────────────────────────────────────────────
 
-/** models.json: {"providers": {"anthropic": {"apiKey": "...", "baseUrl": "..."}}}. */
-const MODELS = join(HOME, "models.json");
-const keys: Record<string, { apiKey: string; baseUrl?: string }> = JSON.parse(read(MODELS, "{}")).providers ?? {};
+const CATALOG_TIMEOUT_MS = 15_000;
+const providerConfigs: Record<string, { apiKey: string; baseUrl?: string }> =
+  JSON.parse(readText(MODELS_FILE, "{}")).providers ?? {};
 
-/**
- * What each provider listed last. bee starts with it, and asks again without waiting, for the next start; a provider
- * it has no models of yet, it waits for.
- */
-const CATALOG = join(HOME, "catalog");
-const catalog = (provider: string) => join(CATALOG, `${provider}.json`);
+const catalogPath = (provider: string) => join(CATALOG_DIR, `${provider}.json`);
+const modelRef = (model: Model) => `${model.provider}/${model.id}`;
+const compareNames = new Intl.Collator("en", { numeric: true }).compare;
 
-async function fetchCatalog(provider: string, key: Key) {
-  const { url, headers } = PROVIDERS[provider].listing(key);
-  const response = await fetch(url, { headers });
-  if (!response.ok) return;
-  const json = JSON.stringify(await response.json());
-  const temporary = `${catalog(provider)}.${process.pid}`;
-  mkdirSync(CATALOG, { recursive: true });
-  writeFileSync(temporary, json);
-  renameSync(temporary, catalog(provider));
+async function refreshCatalog(provider: string, config: ProviderConfig) {
+  const { url, headers } = PROVIDERS[provider].listing(config);
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), CATALOG_TIMEOUT_MS);
+  timer.unref();
+  try {
+    const response = await fetch(url, { headers, signal: abort.signal });
+    if (!response.ok) return;
+    const json = JSON.stringify(await response.json());
+    const tmp = `${catalogPath(provider)}.${process.pid}`;
+    mkdirSync(CATALOG_DIR, { recursive: true });
+    writeFileSync(tmp, json);
+    renameSync(tmp, catalogPath(provider));
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-async function listed(provider: string, key: Key): Promise<Model[]> {
-  const fetched = fetchCatalog(provider, key).catch(() => {});
-  const models = () => PROVIDERS[provider].models(JSON.parse(read(catalog(provider), "{}")));
-  if (!models().length) await fetched;
-  return models().map((model) => ({ ...model, ...key, provider }));
+async function loadProviderModels(provider: string, config: ProviderConfig): Promise<Model[]> {
+  // Refresh in the background for next startup; only block when no cached catalog exists yet.
+  const refresh = refreshCatalog(provider, config).catch(() => {});
+  const readCached = () => PROVIDERS[provider].models(JSON.parse(readText(catalogPath(provider), "{}")));
+  if (!readCached().length) await refresh;
+  return readCached().map((meta) => ({ ...meta, ...config, provider }));
 }
 
-const ref = (model: Model) => `${model.provider}/${model.id}`;
-const byName = new Intl.Collator("en", { numeric: true }).compare;
-
-/** The models of every provider bee speaks to that has a key, in order of their names. */
-const providers = await Promise.all(
-  Object.entries(keys)
-    .filter(([provider]) => provider in PROVIDERS)
-    .map(([provider, { apiKey, baseUrl }]) =>
-      listed(provider, { apiKey, baseUrl: baseUrl ?? PROVIDERS[provider].baseUrl }),
-    ),
-);
-const available = providers.flat().sort((a, b) => byName(ref(a), ref(b)));
+const models = (
+  await Promise.all(
+    Object.entries(providerConfigs)
+      .filter(([provider]) => provider in PROVIDERS)
+      .map(([provider, { apiKey, baseUrl }]) =>
+        loadProviderModels(provider, { apiKey, baseUrl: baseUrl ?? PROVIDERS[provider].baseUrl }),
+      ),
+  )
+)
+  .flat()
+  .sort((a, b) => compareNames(modelRef(a), modelRef(b)));
 
 // ── Sessions ────────────────────────────────────────────────────────────────
-// A session is a file of lines, written as things happen, each one thing: how it began, something said, a setting
-// chosen, or the session it was forked from. Lines are only appended, so every request begins with the last one, and
-// the provider's cache of it holds. The first line is how the session began: its directory, the prompt and the tools,
-// with the settings in settings.json, which sets each. The file is made when the first thing is said in it. A reply
-// that runs commands is written with what they returned, in one write, so nothing comes between a command and its
-// output, from any editor. A fork is a session that begins as another did, up to where it parts from it: its file
-// begins with the other's lines up to there, then a line naming the session they are of, then the settings chosen after
-// there, so it is set as the other is.
+// Sessions are append-only JSONL files. Keeping lines strictly append-only preserves prompt-cache
+// prefixes across turns. Empty sessions and fresh forks stay in memory until the first message.
 
-const SETTINGS = ["model", "thinking", "cache"] as const;
-type Setting = (typeof SETTINGS)[number];
-type Settings = Partial<Record<Setting, string>>;
-type Line = Settings & { began?: Began; user?: User; reply?: Reply; result?: Result; forked?: string };
+const sessionPath = (sid: string) => join(SESSIONS_DIR, `${sid}.jsonl`);
+const pendingSessions = new Map<string, SessionLine[]>();
+const sessionCache = new Map<string, { size: number; lines: SessionLine[] }>();
 
-/** Whether a line is something said. */
-const says = (line: Line): line is Line & Said => !!(line.user || line.reply || line.result);
-
-const SESSIONS = join(HOME, "sessions");
-const file = (sid: string) => join(SESSIONS, sid + ".jsonl");
-
-const SHOWN = 20_000; // characters of output the model sees per call
-const TIMEOUT = 120; // seconds a command runs before it is stopped
-const GRACE = 1; // seconds a command stopped has to end before it is killed
-
-const BASH = {
-  name: "bash",
-  description:
-    "Every command starts in the working directory. " +
-    `Returns the output, cut at ${SHOWN.toLocaleString("en")} characters, or the image written. ` +
-    `Timeout at ${TIMEOUT} seconds.`,
-  parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
-};
-
-/** AGENTS.md from ~/.bee/agent, then from every directory down to cwd. */
-function instructions(cwd: string) {
+function loadInstructions(cwd: string) {
   const dirs = [cwd];
   while (dirs[0] !== dirname(dirs[0])) dirs.unshift(dirname(dirs[0]));
   return [HOME, ...dirs]
     .map((dir) => join(dir, "AGENTS.md"))
     .filter(existsSync)
-    .map((path) => `<file path="${path}">\n${read(path).trim()}\n</file>`)
+    .map((path) => `<file path="${path}">\n${readText(path).trim()}\n</file>`)
     .join("\n\n");
 }
 
-/** How a session begins: as settings.json sets it. bee sets nothing itself. */
-function beginning(cwd: string): Line {
-  const set: Settings = JSON.parse(read(join(HOME, "settings.json"), "{}"));
-  for (const setting of SETTINGS) if (!(setting in set)) throw new Error(`settings.json sets no ${setting}`);
-  const began = {
+function createSessionHeader(cwd: string): SessionLine {
+  const config: ConfigValues = JSON.parse(readText(join(HOME, "settings.json"), "{}"));
+  for (const key of CONFIG_KEYS) if (!(key in config)) throw new Error(`settings.json sets no ${key}`);
+  const began: SessionHeader = {
     cwd,
-    prompt: `\nYou are an agent in the bee harness.\n\n${instructions(cwd)}`.trimEnd(),
-    tools: [BASH],
+    prompt: `\nYou are an agent in the bee harness.\n\n${loadInstructions(cwd)}`.trimEnd(),
+    tools: [BASH_TOOL],
     timestamp: Date.now(),
   };
-  return { ...set, began };
+  return { ...config, began };
 }
 
-/** The lines of each session nothing has been said in yet, held until the first thing said writes them. */
-const unborn = new Map<string, Line[]>();
-
-/** A session's file as it was written: nothing, for one nothing has been said in. */
-const written = (sid: string) => (existsSync(file(sid)) ? readFileSync(file(sid)) : Buffer.alloc(0));
-
-/** The line of what was written that begins at `at`. */
-const lineAt = (all: Buffer, at: number): Line => parse(all.toString("utf8", at, all.indexOf("\n", at)));
-
-/**
- * The lines of each session worked in, as last read, and how many bytes they were. A session is only appended to, so
- * a file as long holds the same lines.
- */
-const kept = new Map<string, { size: number; lines: Line[] }>();
-
-/** A session's lines. One that is not JSON is empty. */
-function lines(sid: string): Line[] {
-  const held = unborn.get(sid);
-  if (held) return held;
-  if (!/^[\w-]+$/.test(sid) || !existsSync(file(sid))) throw failure(-32002, `No session ${sid}`);
-  const { size } = statSync(file(sid));
-  if (kept.get(sid)?.size !== size) kept.set(sid, { size, lines: read(file(sid)).trimEnd().split("\n").map(parse) });
-  return kept.get(sid)!.lines;
+function readSession(sid: string): SessionLine[] {
+  const pending = pendingSessions.get(sid);
+  if (pending) return pending;
+  if (!/^[\w-]+$/.test(sid) || !existsSync(sessionPath(sid))) throw rpcError(-32002, `No session ${sid}`);
+  const { size } = statSync(sessionPath(sid));
+  if (sessionCache.get(sid)?.size !== size) {
+    sessionCache.set(sid, { size, lines: readText(sessionPath(sid)).trimEnd().split("\n").map(parseJson) });
+  }
+  return sessionCache.get(sid)!.lines;
 }
 
-/**
- * Add a line to a session, and describe it as the file now says. The first thing said makes the file, with the lines
- * held before it, so no file is a session nothing was said in. Nothing else makes it, so a session deleted stays
- * deleted: a line written to a new file would be a session with no beginning, which no model will take and no one can
- * list.
- */
-function append(sid: string, ...added: Line[]) {
-  const held = unborn.get(sid);
-  if (held && !added.some(says)) return void held.push(...added);
+function appendSession(sid: string, ...added: SessionLine[]) {
+  const pending = pendingSessions.get(sid);
+  if (pending && !added.some(isMessageEntry)) return void pending.push(...added);
+
+  const batch = [...(pending ?? []), ...added];
+  const payload = batch.map((line) => JSON.stringify(line) + "\n").join("");
   let fd: number;
   try {
-    fd = openSync(file(sid), held ? "wx" : constants.O_WRONLY | constants.O_APPEND);
+    // Use O_APPEND for existing sessions so a deleted session file stays deleted rather than recreated headless.
+    fd = openSync(sessionPath(sid), pending ? "wx" : constants.O_WRONLY | constants.O_APPEND);
   } catch (error: any) {
-    throw error.code === "ENOENT" ? failure(-32002, `No session ${sid}`) : error;
+    throw error.code === "ENOENT" ? rpcError(-32002, `No session ${sid}`) : error;
   }
   try {
-    writeSync(fd, [...(held ?? []), ...added].map((line) => JSON.stringify(line) + "\n").join(""));
-    unborn.delete(sid);
+    writeSync(fd, payload);
+    pendingSessions.delete(sid);
   } finally {
     closeSync(fd);
   }
-  describe(sid);
-}
 
-/** How a session began. */
-const beganOf = (sid: string) => lines(sid)[0].began!;
-
-/** How a session began, as a key: the same in each of its forks, as each begins with its first line. */
-const origin = (sid: string) => Bun.hash(JSON.stringify(lines(sid)[0])).toString(36);
-
-/** What was said in a session. */
-const conversation = (sid: string): Said[] => lines(sid).filter(says);
-
-/** What each setting is set to: what the latest line that sets it says. The first line sets each. */
-function chosen(sid: string) {
-  const all = lines(sid);
-  return Object.fromEntries(
-    SETTINGS.map((setting) => [setting, all.findLast((line) => setting in line)![setting]!]),
-  ) as Record<Setting, string>;
-}
-
-/** The model chosen, if there is a key for it. */
-const modelOf = (sid: string) => available.find((one) => ref(one) === chosen(sid).model);
-
-/** Fail unless a setting can be the value: one of its options. */
-function allow(sid: string, setting: string, value: string) {
-  const option = options(sid).find((option) => option.id === setting);
-  if (!option?.options.some((one) => one.value === value)) throw failure(-32602, `No ${setting} ${value}`);
-}
-
-/** The settings a request is made with, each as chosen. One that is not one of its options fails it. */
-function settings(sid: string) {
-  const set = chosen(sid);
-  for (const setting of SETTINGS) allow(sid, setting, set[setting]);
-  return { model: modelOf(sid)!, thinking: set.thinking as Level, cache: set.cache as Cache };
-}
-
-/**
- * Fork a session: a new one, with all its lines or those before a cursor, then the settings chosen after it, so it is
- * set as the session is. A cursor is the place of something the user said: how many lines come before it. Lines are
- * only appended, so a cursor never moves. Like a new session, a fork has no file until something is said in it, so one
- * nothing is said in leaves none.
- */
-function fork(sid: string, cursorId?: string) {
-  const all = lines(sid);
-  const at = cursorId == null ? all.length : all.findIndex((line, n) => String(n) === cursorId && line.user);
-  if (at < 0) throw failure(-32602, `No cursor ${cursorId}`);
-  const forked = randomUUID();
-  const chosen = all.slice(at).filter((line) => SETTINGS.some((setting) => setting in line));
-  unborn.set(forked, [...all.slice(0, at), { forked: sid }, ...chosen]);
-  return forked;
-}
-
-// ── The turn ────────────────────────────────────────────────────────────────
-
-/** One reply from the model, streamed to the editor. */
-async function ask(sid: string, signal: AbortSignal) {
-  const { model, thinking, cache } = settings(sid);
-  const tell: Tell = (type, words) => say(sid, type === "text" ? "agent_message" : "agent_thought", words);
-  return stream(model, beganOf(sid), conversation(sid), { origin: origin(sid), thinking, cache, signal }, tell);
-}
-
-/** A turn under way: how to stop it, what the user said that it has not read, and how it ends. */
-type Turn = { abort: AbortController; said: User[]; done?: Promise<string> };
-const turns = new Map<string, Turn>();
-
-/**
- * Write what the user said that the turn has not read, in order, but for what says nothing. An editor that reads
- * cursors is told.
- */
-const hear = (sid: string, said: User[]) => {
-  for (const told of said.splice(0).filter((told) => !silent(told.content))) {
-    const at = lines(sid).length;
-    append(sid, { user: told });
-    if (cursors) quote(sid, told, at);
+  const bytes = Buffer.byteLength(payload);
+  const size = statSync(sessionPath(sid)).size;
+  const cached = sessionCache.get(sid);
+  if (pending && size === bytes) sessionCache.set(sid, { size, lines: batch });
+  else if (cached && cached.size + bytes === size) {
+    cached.size = size;
+    cached.lines.push(...added);
   }
-};
-
-/** Whether something said waits for the model to answer it: the last thing sent is not a reply. */
-function waiting(sid: string) {
-  const last = sendable(conversation(sid)).at(-1);
-  return !!last && !("reply" in last);
+  emitSessionMeta(sid);
 }
 
-/**
- * Read what the user said, and while something waits for an answer, ask, run what it asks for, and again until it has
- * nothing to run and nothing more was said. A prompt that says nothing asks again what a turn failed or was stopped
- * before answering. A prompt sent during a turn joins it, and the model reads it once the commands it is running end. A
- * reply is written once its commands end, with what they returned. A request refused with what the commands returned is
- * asked again, with the refusal in its place. One that failed for now is asked again, the same, a few times, each
- * later.
- */
-async function turn(sid: string, { abort: { signal }, said }: Turn): Promise<string> {
-  let results: Result[] = [];
-  let tries = 0; // how many times in a row a reply failed for now
+const sessionHeader = (sid: string) => readSession(sid)[0].began!;
+// Stable hash of the first line; shared across forks so provider prompt caches stay warm.
+const sessionOrigin = (sid: string) => Bun.hash(JSON.stringify(readSession(sid)[0])).toString(36);
+const sessionHistory = (sid: string): MessageEntry[] => readSession(sid).filter(isMessageEntry);
+
+function sessionConfig(sid: string) {
+  const entries = readSession(sid);
+  return Object.fromEntries(CONFIG_KEYS.map((key) => [key, entries.findLast((line) => key in line)![key]!])) as Record<
+    ConfigKey,
+    string
+  >;
+}
+
+const sessionModel = (sid: string) => models.find((m) => modelRef(m) === sessionConfig(sid).model);
+
+function validateConfig(sid: string, key: string, value: string) {
+  const option = configOptions(sid).find((opt) => opt.id === key);
+  if (!option?.options.some((choice) => choice.value === value)) throw rpcError(-32602, `No ${key} ${value}`);
+}
+
+function resolveConfig(sid: string) {
+  const config = sessionConfig(sid);
+  for (const key of CONFIG_KEYS) validateConfig(sid, key, config[key]);
+  return { model: sessionModel(sid)!, thinking: config.thinking as ThinkingLevel, cache: config.cache as CacheMode };
+}
+
+function forkSession(sid: string, cursorId?: string) {
+  const entries = readSession(sid);
+  const index = cursorId == null ? entries.length : entries.findIndex((line, i) => String(i) === cursorId && line.user);
+  if (index < 0) throw rpcError(-32602, `No cursor ${cursorId}`);
+  const forkedId = randomUUID();
+  // Preserve config changes made after the fork point so the fork inherits current settings.
+  const trailingConfig = entries.slice(index).filter((line) => CONFIG_KEYS.some((key) => key in line));
+  pendingSessions.set(forkedId, [...entries.slice(0, index), { forked: sid }, ...trailingConfig]);
+  return forkedId;
+}
+
+// ── Agent Loop ──────────────────────────────────────────────────────────────
+
+type ActiveTurn = { abort: AbortController; queued: UserMessage[]; done?: Promise<string> };
+const activeTurns = new Map<string, ActiveTurn>();
+
+function flushUserMessages(sid: string, queue: UserMessage[]) {
+  for (const msg of queue.splice(0).filter((m) => !isEmptyContent(m.content))) {
+    const cursor = readSession(sid).length;
+    appendSession(sid, { user: msg });
+    if (clientSupportsCursors) emitUserMessage(sid, msg, cursor);
+  }
+}
+
+function needsReply(sid: string) {
+  const last = sanitizeHistory(sessionHistory(sid)).at(-1);
+  return Boolean(last && !("reply" in last));
+}
+
+async function executeToolCall(sid: string, call: ToolCall, signal: AbortSignal) {
+  emitToolStart(sid, call);
+  const { content, failed } = await runBash(sid, call, signal).catch((error: Error) => ({
+    content: [{ type: "text" as const, text: notice(error.message) }],
+    failed: true,
+  }));
+  const result = makeToolResult(call, content, failed);
+  emitToolResult(sid, call, result);
+  return result;
+}
+
+async function requestReply(sid: string, signal: AbortSignal) {
+  const { model, thinking, cache } = resolveConfig(sid);
+  const onDelta: StreamCallback = (kind, delta) =>
+    sendChunk(sid, kind === "text" ? "agent_message" : "agent_thought", delta);
+  return streamReply(
+    model,
+    sessionHeader(sid),
+    sessionHistory(sid),
+    { origin: sessionOrigin(sid), thinking, cache, signal },
+    onDelta,
+  );
+}
+
+async function runTurn(sid: string, { abort: { signal }, queued }: ActiveTurn): Promise<string> {
+  let lastResults: ToolResult[] = [];
+  let retries = 0;
   try {
     for (;;) {
-      hear(sid, said);
+      flushUserMessages(sid, queued);
       if (signal.aborted) return "cancelled";
-      if (!waiting(sid)) return "end_turn";
-      const reply = await ask(sid, signal);
-      const again = reply.end === "refused" && results.length > 0;
+      if (!needsReply(sid)) return "end_turn";
+
+      const reply = await requestReply(sid, signal);
+      // If tool output caused a 400/413 refusal, persist the refusal so sanitizeHistory replaces those results on retry.
+      const retryRefusal = reply.end === "refused" && lastResults.length > 0;
       const calls = reply.end ? [] : reply.content.filter((block) => block.type === "call");
-      results = [];
-      for (const call of calls) if (!signal.aborted) results.push(await run(sid, call, signal));
-      append(sid, { reply }, ...results.map((result) => ({ result })));
-      if (again) continue;
-      tries = later(reply) ? tries + 1 : 0;
-      if (tries && tries <= TRIES) {
-        await sleep(1000 * 2 ** (tries - 1), null, { signal }).catch(() => {});
+      lastResults = [];
+      for (const call of calls) if (!signal.aborted) lastResults.push(await executeToolCall(sid, call, signal));
+
+      // Write reply and its tool results in one append so tool calls and results never interleave with other writes.
+      appendSession(sid, { reply }, ...lastResults.map((result) => ({ result })));
+      if (retryRefusal) continue;
+
+      retries = isRetryable(reply) ? retries + 1 : 0;
+      if (retries && retries <= MAX_RETRIES) {
+        await sleep(1000 * 2 ** (retries - 1), null, { signal }).catch(() => {});
         continue;
       }
       if (reply.end === "failed" || reply.end === "refused") throw new Error(reply.why);
-      if (!calls.length && !said.length && !signal.aborted) return reply.end === "cut" ? "max_tokens" : "end_turn";
+      if (!calls.length && !queued.length && !signal.aborted) return reply.end === "cut" ? "max_tokens" : "end_turn";
     }
   } finally {
-    // However the turn ends, it is over first, so a write that fails cannot leave it under way for every prompt after
-    // to join; then all that was said is written, so none is left behind.
-    turns.delete(sid);
-    hear(sid, said);
+    // Delete turn before flushing so a write error can't leave a zombie turn absorbing future prompts.
+    activeTurns.delete(sid);
+    flushUserMessages(sid, queued);
   }
 }
 
-// ── The tool ────────────────────────────────────────────────────────────────
+// ── ACP Protocol ────────────────────────────────────────────────────────────
 
-/** The images a model can see, by how their bytes begin. */
-const IMAGES: Record<string, RegExp> = {
-  "image/png": /^\x89PNG/,
-  "image/jpeg": /^\xff\xd8\xff/,
-  "image/gif": /^GIF8/,
-  "image/webp": /^RIFF....WEBP/s,
-};
+let clientSupportsCursors = false;
 
-/** The head of text too long to show whole: its first lines up to SHOWN characters, and where all of it is. */
-function head(text: string, path: string) {
-  const end = text.lastIndexOf("\n", SHOWN);
-  const shown = text.slice(0, end > 0 ? end : SHOWN).replace(/[\ud800-\udbff]$/, ""); // not half a character
-  const unshown = (text.length - shown.length).toLocaleString("en");
-  return `${shown}\n${bee(`${unshown} characters not shown, full output in ${path}`)}`;
-}
+const sendRpc = (payload: object) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...payload }) + "\n");
+const sendUpdate = (sessionId: string, update: object) =>
+  sendRpc({ method: "session/update", params: { sessionId, update } });
+const sendChunk = (
+  sid: string,
+  kind: "user_message" | "agent_message" | "agent_thought",
+  text: string,
+  messageId?: string,
+) => text && sendUpdate(sid, { sessionUpdate: `${kind}_chunk`, messageId, content: { type: "text", text } });
 
-/**
- * Run the command a call asks for. Returns what it wrote, as text or an image, and whether it failed. Text cut keeps
- * its file. A call that cannot run throws why.
- */
-async function bash(sid: string, call: Call, signal: AbortSignal) {
-  const { command } = call.arguments;
-  const { cwd } = beganOf(sid);
-  if (call.name !== BASH.name) throw new Error("tool does not exist");
-  if (typeof command !== "string") throw new Error("command is not a string");
-  // Every command starts in the working directory, so with it gone none can, and the model is told so, not that there
-  // is no bash.
-  if (!existsSync(cwd)) throw new Error("working directory does not exist");
-  // Written to a file, not a pipe, so the call ends when the command does, whatever it left running.
-  const path = join(tmpdir(), `bee-${randomUUID()}`);
-  const out = openSync(path, "w");
-  // In its own process group, so an interrupt stops all of it: asked to end, and what is left once it has, or a moment
-  // later, killed.
-  const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", out, out], detached: true });
-  const kill = (name: NodeJS.Signals) => {
-    try {
-      process.kill(-child.pid!, name);
-    } catch {} // a group that is gone is stopped
-  };
-  // Stopped as the user stops it, at the timeout too.
-  const timeout = AbortSignal.timeout(TIMEOUT * 1000);
-  const stop = AbortSignal.any([signal, timeout]);
-  const interrupt = () => {
-    kill("SIGINT");
-    setTimeout(kill, GRACE * 1000, "SIGKILL").unref();
-  };
-  stop.addEventListener("abort", interrupt);
-  let cut = false;
-  try {
-    const [status] = await once(child, "exit");
-    const written = readFileSync(path);
-    const start = written.subarray(0, 12).toString("latin1");
-    const format = isUtf8(written) ? "text" : Object.keys(IMAGES).find((type) => IMAGES[type].test(start));
-    const text = written.toString("utf8").trimEnd();
-    cut = format === "text" && text.length > SHOWN;
-    // What bee says of how the command ended is the last line of what it returned.
-    const ended = timeout.aborted ? bee("timeout") : "";
-    const told = (text: string) => ({ type: "text" as const, text: [text, ended].filter(Boolean).join("\n") });
-    const content: Result["content"] =
-      format === "text"
-        ? [told(cut ? head(text, path) : text)]
-        : format
-          ? [{ type: "image", data: written.toString("base64"), mimeType: format }, ...(ended ? [told("")] : [])]
-          : [told(bee("output is of unsupported format"))];
-    return { content, failed: status !== 0 || !format };
-  } finally {
-    stop.removeEventListener("abort", interrupt);
-    if (stop.aborted) kill("SIGKILL");
-    closeSync(out);
-    if (!cut) rmSync(path);
-  }
-}
+const extractText = (content: { type: string; text?: string }[]) => content.map((b) => b.text ?? "").join("");
+const firstLine = (text: string) => text.trim().split("\n")[0].slice(0, 80);
+const totalTokens = ({ input, output, cacheRead, cacheWrite }: Usage) => input + output + cacheRead + cacheWrite;
+const callCommand = (call: ToolCall) => String(call.arguments.command ?? "");
 
-/** Run one tool call, shown to the editor. One that cannot be run is told why, by bee. */
-async function run(sid: string, call: Call, signal: AbortSignal) {
-  showCall(sid, call);
-  const { content, failed } = await bash(sid, call, signal).catch((error: Error) => ({
-    content: [{ type: "text" as const, text: bee(error.message) }],
-    failed: true,
-  }));
-  const answer = result(call, content, failed);
-  showResult(sid, call, answer);
-  return answer;
-}
-
-// ── The editor ──────────────────────────────────────────────────────────────
-// ACP: JSON-RPC, one message per line, on stdin and stdout.
-
-const send = (message: object) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n");
-const update = (sessionId: string, fields: object) =>
-  send({ method: "session/update", params: { sessionId, update: fields } });
-
-const say = (sid: string, who: "user_message" | "agent_message" | "agent_thought", words: string, messageId?: string) =>
-  words && update(sid, { sessionUpdate: `${who}_chunk`, messageId, content: { type: "text", text: words } });
-
-/** Whether the editor reads cursors, as it said when it began. */
-let cursors = false;
-
-/**
- * Tell the editor something the user said, at line `at`, and, if it reads cursors, the cursor before it: a fork can
- * begin there. Such an editor is told what the user said as bee hears it, so it holds what each cursor is before.
- */
-function quote(sid: string, told: User, at: number) {
-  const messageId = randomUUID();
-  say(sid, "user_message", plain(told.content), messageId);
-  if (!cursors) return;
-  const anchor = { type: "user_message", messageId, position: "before" };
-  update(sid, { sessionUpdate: "cursor_update", cursorId: String(at), capabilities: { fork: {} }, anchor });
-}
-
-/** What a text is called: the start of its first line. */
-const headline = (text: string) => text.trim().split("\n")[0].slice(0, 80);
-
-/**
- * What a session is called: the headline of the first thing the user said in it since it began, or was forked. Each
- * line is one thing, by the key it begins with, so the lines that say are found by how they begin, and only the one
- * said is read.
- */
-function title(all: Buffer) {
-  const said = all.indexOf('\n{"user":', all.lastIndexOf('\n{"forked":') + 1);
-  return said < 0 ? undefined : headline(plain(lineAt(all, said + 1).user!.content)) || undefined;
-}
-
-/**
- * Tell the editor what the file says of the session: what it is called, and how full the context of the model chosen
- * is, as the last reply counted it. A reply that failed or was stopped first counted nothing.
- */
-function describe(sid: string) {
-  const all = lines(sid);
-  const called = title(written(sid));
-  const used = all.map((line) => (line.reply ? counted(line.reply.usage) : 0)).findLast(Boolean);
-  const size = modelOf(sid)?.contextWindow;
-  if (called) update(sid, { sessionUpdate: "session_info_update", title: called });
-  if (used && size) update(sid, { sessionUpdate: "usage_update", used, size });
-}
-
-/** How many tokens a request was, and its reply. */
-const counted = ({ input, output, cacheRead, cacheWrite }: Usage) => input + output + cacheRead + cacheWrite;
-
-/** What was said, as plain text. */
-const plain = (content: { type: string; text?: string }[]) => content.map((block) => block.text ?? "").join("");
-
-/** A code block, fenced by more backticks than it holds. */
-function fenced(body: string, language = "") {
-  const fence = "`".repeat(Math.max(3, ...[...body.matchAll(/`+/g)].map((ticks) => ticks[0].length + 1)));
+function codeBlock(body: string, language = "") {
+  const fence = "`".repeat(Math.max(3, ...[...body.matchAll(/`+/g)].map((m) => m[0].length + 1)));
   return { type: "content", content: { type: "text", text: `${fence}${language}\n${body.trim()}\n${fence}` } };
 }
 
-/** The command a call asks for, as text. */
-const command = (call: Call) => String(call.arguments.command ?? "");
-
-/** Show the editor a call as it starts: its command, called by its headline. */
-function showCall(sid: string, call: Call) {
-  const shown = { toolCallId: call.id, title: headline(command(call)), kind: "execute" };
-  const content = [fenced(command(call), "bash")];
-  update(sid, { sessionUpdate: "tool_call", ...shown, status: "in_progress", content, rawInput: call.arguments });
-}
-
-/** Show the editor a call as it ended: its command, and what it returned. */
-function showResult(sid: string, call: Call, answer: Result) {
-  const status = answer.failed ? "failed" : "completed";
-  const output = answer.content.map((block) =>
-    block.type === "image" ? { type: "content", content: block } : fenced(block.text),
-  );
-  const content = [fenced(command(call), "bash"), ...output];
-  update(sid, {
-    sessionUpdate: "tool_call_update",
-    toolCallId: call.id,
-    status,
-    content,
-    rawOutput: plain(answer.content),
+function emitUserMessage(sid: string, msg: UserMessage, cursor: number) {
+  const messageId = randomUUID();
+  sendChunk(sid, "user_message", extractText(msg.content), messageId);
+  if (!clientSupportsCursors) return;
+  sendUpdate(sid, {
+    sessionUpdate: "cursor_update",
+    cursorId: String(cursor),
+    capabilities: { fork: {} },
+    anchor: { type: "user_message", messageId, position: "before" },
   });
 }
 
-/** Show the editor a conversation it has not seen, as it was shown: a call with what it returned, as it was run. */
-function replay(sid: string) {
-  const calls = new Map<string, Call>();
-  for (const [at, { user, reply, result }] of lines(sid).entries()) {
-    if (user) quote(sid, user, at);
+function sessionTitle(entries: SessionLine[]) {
+  const start = entries.findLastIndex((line) => line.forked) + 1;
+  const firstUser = entries.slice(start).find((line) => line.user);
+  return firstUser ? firstLine(extractText(firstUser.user!.content)) || undefined : undefined;
+}
+
+function emitSessionMeta(sid: string) {
+  const entries = readSession(sid);
+  const title = sessionTitle(entries);
+  const used = entries.map((line) => (line.reply ? totalTokens(line.reply.usage) : 0)).findLast(Boolean);
+  const size = sessionModel(sid)?.contextWindow;
+  if (title) sendUpdate(sid, { sessionUpdate: "session_info_update", title });
+  if (used && size) sendUpdate(sid, { sessionUpdate: "usage_update", used, size });
+}
+
+function emitToolStart(sid: string, call: ToolCall) {
+  sendUpdate(sid, {
+    sessionUpdate: "tool_call",
+    toolCallId: call.id,
+    title: firstLine(callCommand(call)),
+    kind: "execute",
+    status: "in_progress",
+    content: [codeBlock(callCommand(call), "bash")],
+    rawInput: call.arguments,
+  });
+}
+
+function emitToolResult(sid: string, call: ToolCall, result: ToolResult) {
+  const output = result.content.map((block) =>
+    block.type === "image" ? { type: "content", content: block } : codeBlock(block.text),
+  );
+  sendUpdate(sid, {
+    sessionUpdate: "tool_call_update",
+    toolCallId: call.id,
+    status: result.failed ? "failed" : "completed",
+    content: [codeBlock(callCommand(call), "bash"), ...output],
+    rawOutput: extractText(result.content),
+  });
+}
+
+function replaySession(sid: string) {
+  const calls = new Map<string, ToolCall>();
+  for (const [index, { user, reply, result }] of readSession(sid).entries()) {
+    if (user) emitUserMessage(sid, user, index);
     if (result) {
       const call = calls.get(result.call)!;
-      showCall(sid, call);
-      showResult(sid, call, result);
+      emitToolStart(sid, call);
+      emitToolResult(sid, call, result);
     }
     for (const block of reply?.content ?? []) {
-      if (block.type === "text") say(sid, "agent_message", block.text);
-      if (block.type === "thinking") say(sid, "agent_thought", block.text);
+      if (block.type === "text") sendChunk(sid, "agent_message", block.text);
+      if (block.type === "thinking") sendChunk(sid, "agent_thought", block.text);
       if (block.type === "call") calls.set(block.id, block);
     }
   }
 }
 
-/**
- * The settings, each as the editor changes it: as chosen, and its options: the models there is a key for, the levels
- * the model chosen thinks at, and the caches. Each one's id is its key in a line.
- */
-function options(sid: string) {
-  const { model, thinking, cache } = chosen(sid);
-  const models = available.map((one) => ({ value: ref(one), name: one.name }));
-  const [levels, caches] = [modelOf(sid)?.levels ?? [], CACHES].map((values) =>
+function configOptions(sid: string) {
+  const { model, thinking, cache } = sessionConfig(sid);
+  const modelChoices = models.map((m) => ({ value: modelRef(m), name: m.name }));
+  const [thinkingChoices, cacheChoices] = [sessionModel(sid)?.levels ?? [], CACHE_MODES].map((values) =>
     values.map((value) => ({ value, name: value })),
   );
   return [
-    { id: "model", name: "Model", category: "model", currentValue: model, options: models },
-    { id: "thinking", name: "Thinking", category: "thought_level", currentValue: thinking, options: levels },
-    { id: "cache", name: "Cache", currentValue: cache, options: caches },
+    { id: "model", name: "Model", category: "model", currentValue: model, options: modelChoices },
+    { id: "thinking", name: "Thinking", category: "thought_level", currentValue: thinking, options: thinkingChoices },
+    { id: "cache", name: "Cache", currentValue: cache, options: cacheChoices },
   ].map((option) => ({ type: "select", ...option }));
 }
 
-/** The sessions, latest first. */
-function list(cwd?: string) {
-  return readdirSync(SESSIONS)
+// Fast raw-buffer line scan for session/list so listing large session histories avoids parsing every JSONL line.
+const parseLineAt = (buf: Buffer, offset: number): SessionLine =>
+  parseJson(buf.toString("utf8", offset, buf.indexOf("\n", offset)));
+
+function extractTitleFromBuffer(buf: Buffer) {
+  const offset = buf.indexOf('\n{"user":', buf.lastIndexOf('\n{"forked":') + 1);
+  return offset < 0 ? undefined : firstLine(extractText(parseLineAt(buf, offset + 1).user!.content)) || undefined;
+}
+
+function listSessions(cwd?: string) {
+  return readdirSync(SESSIONS_DIR)
     .flatMap((name) => /^([\w-]+)\.jsonl$/.exec(name)?.[1] ?? [])
     .map((sessionId) => {
-      const all = written(sessionId);
-      const updatedAt = statSync(file(sessionId)).mtime.toISOString();
-      return { sessionId, cwd: lineAt(all, 0).began!.cwd, title: title(all), updatedAt };
+      const path = sessionPath(sessionId);
+      const buf = readFileSync(path);
+      const updatedAt = statSync(path).mtime.toISOString();
+      return { sessionId, cwd: parseLineAt(buf, 0).began!.cwd, title: extractTitleFromBuffer(buf), updatedAt };
     })
     .filter((session) => !cwd || session.cwd === cwd)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
-/** An image pasted, as a file the model can read, named by what it holds: its path. */
-function saved(bytes: Buffer, mimeType: string) {
-  const name = createHash("sha256").update(bytes).digest("hex").slice(0, 12);
-  const path = join(tmpdir(), `bee-${name}.${mimeType.split("/")[1]}`);
+function saveTempImage(bytes: Buffer, mimeType: string) {
+  const hash = createHash("sha256").update(bytes).digest("hex").slice(0, 12);
+  const path = join(tmpdir(), `bee-${hash}.${mimeType.split("/")[1]}`);
   writeFileSync(path, bytes);
   return path;
 }
 
-/** Prompt blocks from the editor, as content for the model. */
-const parts = (blocks: any[]): User["content"] =>
+const parsePromptBlocks = (blocks: any[]): UserMessage["content"] =>
   blocks.map((block) =>
     block.type === "image"
-      ? { type: "text", text: saved(Buffer.from(block.data, "base64"), block.mimeType) }
+      ? { type: "text", text: saveTempImage(Buffer.from(block.data, "base64"), block.mimeType) }
       : block.type === "resource"
         ? { type: "text", text: `<file uri="${block.resource.uri}">\n${block.resource.text ?? ""}\n</file>` }
         : { type: "text", text: block.text ?? block.uri ?? "" },
   );
 
-/** A session the editor opens, described. */
-function open(sessionId: string) {
-  describe(sessionId);
-  return { sessionId, configOptions: options(sessionId) };
+function openSession(sessionId: string) {
+  emitSessionMeta(sessionId);
+  return { sessionId, configOptions: configOptions(sessionId) };
 }
 
 const handlers: Record<string, (params: any) => unknown> = {
   initialize: ({ clientCapabilities }) => {
-    cursors = !!clientCapabilities?.session?.cursors;
+    clientSupportsCursors = Boolean(clientCapabilities?.session?.cursors);
     return {
       protocolVersion: 1,
       agentInfo: { name: "bee", title: "bee", version },
@@ -1208,59 +1188,60 @@ const handlers: Record<string, (params: any) => unknown> = {
   },
   "session/new": ({ cwd }) => {
     const sessionId = randomUUID();
-    unborn.set(sessionId, [beginning(cwd)]);
-    return open(sessionId);
+    pendingSessions.set(sessionId, [createSessionHeader(cwd)]);
+    return openSession(sessionId);
   },
-  "session/resume": ({ sessionId }) => open(sessionId),
+  "session/resume": ({ sessionId }) => openSession(sessionId),
   "session/load": ({ sessionId }) => {
-    replay(sessionId);
-    return open(sessionId);
+    replaySession(sessionId);
+    return openSession(sessionId);
   },
-  "session/fork": ({ sessionId, cursorId }) => open(fork(sessionId, cursorId)),
-  "session/list": ({ cwd }) => ({ sessions: list(cwd) }),
+  "session/fork": ({ sessionId, cursorId }) => openSession(forkSession(sessionId, cursorId)),
+  "session/list": ({ cwd }) => ({ sessions: listSessions(cwd) }),
   "session/set_config_option": ({ sessionId, configId, value }) => {
-    allow(sessionId, configId, value);
-    append(sessionId, { [configId]: value });
-    return { configOptions: options(sessionId) };
+    validateConfig(sessionId, configId, value);
+    appendSession(sessionId, { [configId]: value });
+    return { configOptions: configOptions(sessionId) };
   },
-  "session/cancel": ({ sessionId }) => turns.get(sessionId)?.abort.abort(),
+  "session/cancel": ({ sessionId }) => activeTurns.get(sessionId)?.abort.abort(),
   "session/prompt": async ({ sessionId, prompt }) => {
-    const told = user(parts(prompt));
-    let under = turns.get(sessionId);
-    if (under) under.said.push(told);
+    const msg = makeUserMessage(parsePromptBlocks(prompt));
+    let active = activeTurns.get(sessionId);
+    if (active) active.queued.push(msg);
     else {
-      under = { abort: new AbortController(), said: [told] };
-      turns.set(sessionId, under);
-      under.done = turn(sessionId, under);
+      active = { abort: new AbortController(), queued: [msg] };
+      activeTurns.set(sessionId, active);
+      active.done = runTurn(sessionId, active);
     }
-    return { stopReason: await under.done };
+    return { stopReason: await active.done };
   },
 };
 
-/**
- * The editor hung up, or the terminal closed: stop every turn as a cancel does, so each writes down how far it got,
- * then go. What is said to an editor that is gone is lost, and only the file matters.
- */
-async function hangUp() {
-  const under = [...turns.values()];
-  for (const turn of under) turn.abort.abort();
-  await Promise.allSettled(under.map((turn) => turn.done));
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  const running = [...activeTurns.values()];
+  for (const active of running) active.abort.abort();
+  await Promise.allSettled(running.map((active) => active.done));
   process.exit();
 }
-for (const signal of ["SIGHUP", "SIGTERM", "SIGINT"] as const) process.on(signal, hangUp);
+
+for (const sig of ["SIGHUP", "SIGTERM", "SIGINT"] as const) process.on(sig, shutdown);
 process.stdout.on("error", () => {});
 
-mkdirSync(SESSIONS, { recursive: true, mode: 0o700 });
+mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
 for await (const line of createInterface({ input: process.stdin })) {
-  const { id, method, params } = parse(line);
-  if (!method) continue; // a reply, and we ask nothing; or not JSON
-  const reply = (answer: object) => id !== undefined && send({ id, ...answer });
-  const unknown = () => Promise.reject(failure(-32601, `No method ${method}`));
+  const { id, method, params } = parseJson(line);
+  if (!method) continue;
+  const respond = (payload: object) => id !== undefined && sendRpc({ id, ...payload });
+  const unknownMethod = () => Promise.reject(rpcError(-32601, `No method ${method}`));
   Promise.resolve(params ?? {})
-    .then(Object.hasOwn(handlers, method) ? handlers[method] : unknown)
+    .then(Object.hasOwn(handlers, method) ? handlers[method] : unknownMethod)
     .then(
-      (result) => reply({ result: result ?? {} }),
-      (error) => reply({ error: { code: Number.isInteger(error.code) ? error.code : -32603, message: error.message } }),
+      (result) => respond({ result: result ?? {} }),
+      (error) =>
+        respond({ error: { code: Number.isInteger(error.code) ? error.code : -32603, message: error.message } }),
     );
 }
-await hangUp();
+await shutdown();
