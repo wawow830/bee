@@ -766,7 +766,7 @@ function instructions(cwd: string) {
 /** How a session begins: as settings.json sets it. bee sets nothing itself. */
 function beginning(cwd: string): Line {
   const set: Settings = JSON.parse(read(join(HOME, "settings.json"), "{}"));
-  for (const setting of SETTINGS) if (!(setting in set)) throw failure(-32000, `settings.json sets no ${setting}`);
+  for (const setting of SETTINGS) if (!(setting in set)) throw new Error(`settings.json sets no ${setting}`);
   const began = {
     cwd,
     prompt: `\nYou are an agent in the bee harness.\n\n${instructions(cwd)}`.trimEnd(),
