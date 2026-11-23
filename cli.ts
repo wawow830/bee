@@ -301,7 +301,7 @@ function renderToolCall({ command, status, output }: ToolCallState) {
 function appendUserEntry(text: string) {
   promptHistory.push(text);
   finishStream();
-  addEntry("user", () => hangIndent(amber(USER_MARK), wordWrap(text, contentWidth())));
+  addEntry("user", () => hangIndent(amber(USER_MARK), wordWrap(text, contentWidth()).map(amber)));
 }
 
 function appendNote(text: string, styler = dark) {
