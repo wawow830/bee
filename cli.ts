@@ -241,9 +241,9 @@ function renderFrame() {
     }),
     ...(hiddenCount ? [PAD + " ".repeat(valueOffset) + dark(`${hiddenCount} more`)] : []),
   ];
-  const pendingLines = [...pendingMessages, ...queuedMessages]
-    .filter(Boolean)
-    .map((text) => amber(USER_MARK) + dark(hardWrap(text, width)[0]));
+  const pendingLines = [...pendingMessages, ...queuedMessages].map(
+    (text) => amber(USER_MARK) + dark(hardWrap(text, width)[0]),
+  );
   const footer: string[] = [];
   for (const section of [pendingLines, promptLines]) {
     if (section.length && (rows.length || footer.length)) footer.push("");
@@ -652,4 +652,4 @@ async function begin() {
   await openSession(latest?.sessionId);
 }
 sendChain = begin().catch((error) => quit(1, error.message + "\n"));
-enqueue(initialPrompt);
+if (initialPrompt) enqueue(initialPrompt);
