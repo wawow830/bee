@@ -241,9 +241,9 @@ function renderFrame() {
     }),
     ...(hiddenCount ? [PAD + " ".repeat(valueOffset) + dark(`${hiddenCount} more`)] : []),
   ];
-  const pendingLines = [...pendingMessages, ...queuedMessages].map(
-    (text) => amber(USER_MARK) + dark(hardWrap(text, width)[0]),
-  );
+  const pendingLines = [...pendingMessages, ...queuedMessages]
+    .filter(Boolean)
+    .map((text) => amber(USER_MARK) + dark(hardWrap(text, width)[0]));
   const footer: string[] = [];
   for (const section of [pendingLines, promptLines]) {
     if (section.length && (rows.length || footer.length)) footer.push("");
@@ -641,14 +641,15 @@ function handleInput(chunk: string) {
 
 // Enter alternate screen, enable bracketed paste, and enable SGR mouse reporting.
 out.write("\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h");
-const abortFatal = (error: Error) => quit(1, error.message + "\n");
-await rpcCall("initialize", { protocolVersion: 1, clientCapabilities: { session: { cursors: {} } } }).catch(abortFatal);
-const latest = resumeLatest ? (await listSessions().catch(abortFatal))[0] : undefined;
-await openSession(latest?.sessionId).catch(abortFatal);
-
 process.stdin.setRawMode(true).setEncoding("utf8").on("data", handleInput);
 out.on("resize", scheduleRender);
+renderFrame();
 
-spliceInput(0, 0, initialPrompt);
-handleSubmit();
-scheduleRender();
+// The prompt is up before bee is: what is sent waits for the session to open.
+async function begin() {
+  await rpcCall("initialize", { protocolVersion: 1, clientCapabilities: { session: { cursors: {} } } });
+  const latest = resumeLatest ? (await listSessions())[0] : undefined;
+  await openSession(latest?.sessionId);
+}
+sendChain = begin().catch((error) => quit(1, error.message + "\n"));
+enqueue(initialPrompt);
