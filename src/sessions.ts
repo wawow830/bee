@@ -32,18 +32,19 @@ import {
   type ToolSchema,
 } from "./types";
 
-// A session's first line holds all session/list needs, so it is read only as far as that line goes.
+// A session's first line holds all session/list needs, so only as much is read as reaches its end.
 function readHead(path: string): SessionLine {
   const fd = openSync(path, "r");
-  const chunk = Buffer.alloc(1 << 12);
-  let head = Buffer.alloc(0);
   try {
-    for (let size; !head.includes("\n") && (size = readSync(fd, chunk));)
-      head = Buffer.concat([head, chunk.subarray(0, size)]);
+    for (let size = 1 << 12; ; size *= 2) {
+      const start = Buffer.alloc(size);
+      const read = readSync(fd, start, 0, size, 0);
+      const end = start.indexOf("\n");
+      if (end >= 0 || read < size) return parseJson(start.toString("utf8", 0, end));
+    }
   } finally {
     closeSync(fd);
   }
-  return parseJson(head.toString("utf8", 0, head.indexOf("\n")));
 }
 
 // A session is named once, as it is first written, by the first thing said in it.
