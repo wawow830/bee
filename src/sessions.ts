@@ -6,7 +6,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
-  readFileSync,
+  readSync,
   statSync,
   writeSync,
 } from "node:fs";
@@ -32,13 +32,24 @@ import {
   type ToolSchema,
 } from "./types";
 
-// Fast raw-buffer line scan for session/list so listing large histories avoids parsing every JSONL line.
-const parseLineAt = (buf: Buffer, offset: number): SessionLine =>
-  parseJson(buf.toString("utf8", offset, buf.indexOf("\n", offset)));
+// A session's first line holds all session/list needs, so it is read only as far as that line goes.
+function readHead(path: string): SessionLine {
+  const fd = openSync(path, "r");
+  const chunk = Buffer.alloc(1 << 12);
+  let head = Buffer.alloc(0);
+  try {
+    for (let size; !head.includes("\n") && (size = readSync(fd, chunk));)
+      head = Buffer.concat([head, chunk.subarray(0, size)]);
+  } finally {
+    closeSync(fd);
+  }
+  return parseJson(head.toString("utf8", 0, head.indexOf("\n")));
+}
 
-function extractTitleFromBuffer(buf: Buffer) {
-  const offset = buf.indexOf('\n{"user":', buf.lastIndexOf('\n{"forked":') + 1);
-  return offset < 0 ? undefined : firstLine(extractText(parseLineAt(buf, offset + 1).user!.content)) || undefined;
+// A session is named once, as it is first written, by the first thing said in it.
+function titleOf(lines: SessionLine[]) {
+  const said = lines.find((line) => line.user)?.user;
+  return said && firstLine(extractText(said.content));
 }
 
 function loadInstructions(home: string, cwd: string) {
@@ -92,7 +103,7 @@ export function createSessionStore(home: string, models: Model[], tools: ToolSch
     const held = pending.get(sid);
     if (held && !added.some(isMessageEntry)) return void held.push(...added);
 
-    const batch = [...(held ?? []), ...added];
+    const batch = held ? [{ ...held[0], title: titleOf(added) }, ...held.slice(1), ...added] : added;
     const payload = batch.map((line) => JSON.stringify(line) + "\n").join("");
     let fd: number;
     try {
@@ -119,8 +130,8 @@ export function createSessionStore(home: string, models: Model[], tools: ToolSch
   }
 
   const header = (sid: string) => read(sid)[0].began!;
-  // Stable hash of the first line; shared across forks so provider prompt caches stay warm.
-  const origin = (sid: string) => Bun.hash(JSON.stringify(read(sid)[0])).toString(36);
+  // Stable hash of how the session began; shared across forks so provider prompt caches stay warm.
+  const origin = (sid: string) => Bun.hash(JSON.stringify(header(sid))).toString(36);
   const history = (sid: string): MessageEntry[] => read(sid).filter(isMessageEntry);
 
   function config(sid: string) {
@@ -162,12 +173,7 @@ export function createSessionStore(home: string, models: Model[], tools: ToolSch
     return { model: model(sid)!, thinking: current.thinking as ThinkingLevel, cache: current.cache as CacheMode };
   }
 
-  function title(sid: string) {
-    const entries = read(sid);
-    const start = entries.findLastIndex((line) => line.forked) + 1;
-    const firstUser = entries.slice(start).find((line) => line.user);
-    return firstUser ? firstLine(extractText(firstUser.user!.content)) || undefined : undefined;
-  }
+  const title = (sid: string) => read(sid)[0].title;
 
   function fork(sid: string, cursorId?: string) {
     const entries = read(sid);
@@ -177,7 +183,9 @@ export function createSessionStore(home: string, models: Model[], tools: ToolSch
     const forkedId = randomUUID();
     // Preserve config changes made after the fork point so the fork inherits current settings.
     const trailingConfig = entries.slice(index).filter((line) => CONFIG_KEYS.some((key) => key in line));
-    pending.set(forkedId, [...entries.slice(0, index), { forked: sid }, ...trailingConfig]);
+    // A fork is unnamed until something is said in it.
+    const head = { ...entries[0], title: undefined };
+    pending.set(forkedId, [head, ...entries.slice(1, index), { forked: sid }, ...trailingConfig]);
     return forkedId;
   }
 
@@ -186,9 +194,8 @@ export function createSessionStore(home: string, models: Model[], tools: ToolSch
       .flatMap((name) => /^([\w-]+)\.jsonl$/.exec(name)?.[1] ?? [])
       .map((sessionId) => {
         const path = pathFor(sessionId);
-        const buf = readFileSync(path);
-        const updatedAt = statSync(path).mtime.toISOString();
-        return { sessionId, cwd: parseLineAt(buf, 0).began!.cwd, title: extractTitleFromBuffer(buf), updatedAt };
+        const { began, title } = readHead(path);
+        return { sessionId, cwd: began!.cwd, title, updatedAt: statSync(path).mtime.toISOString() };
       })
       .filter((session) => !cwd || session.cwd === cwd)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));

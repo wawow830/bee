@@ -26,6 +26,7 @@ export const CONFIG_KEYS = ["model", "thinking", "cache"] as const;
 export type ConfigKey = (typeof CONFIG_KEYS)[number];
 export type ConfigValues = Partial<Record<ConfigKey, string>>;
 export type SessionLine = ConfigValues & {
+  title?: string;
   began?: SessionHeader;
   user?: UserMessage;
   reply?: AssistantReply;
