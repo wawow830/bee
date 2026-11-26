@@ -100,7 +100,7 @@ export async function runBash(cwd: string, call: ToolCall, signal: AbortSignal) 
         ? [withSuffix(truncated ? truncateOutput(text, outPath) : text)]
         : format
           ? [{ type: "image", data: raw.toString("base64"), mimeType: format }, ...(suffix ? [withSuffix("")] : [])]
-          : [withSuffix(notice(`output is neither text nor an image within ${MAX_IMAGE_PIXELS}px`))];
+          : [withSuffix(notice("output is of unsupported format"))];
 
     return { content, failed: stopped || status !== 0 || !format };
   } finally {
