@@ -17,7 +17,7 @@ export const BASH_TOOL: ToolSchema = {
   name: "bash",
   description:
     "Run a shell command in the working directory. " +
-    "Output is returned as text or image. " +
+    `Output is returned as text or image up to ${MAX_IMAGE_PIXELS}px. ` +
     `Default timeout is ${DEFAULT_TIMEOUT}s.`,
   parameters: {
     type: "object",
@@ -100,7 +100,7 @@ export async function runBash(cwd: string, call: ToolCall, signal: AbortSignal) 
         ? [withSuffix(truncated ? truncateOutput(text, outPath) : text)]
         : format
           ? [{ type: "image", data: raw.toString("base64"), mimeType: format }, ...(suffix ? [withSuffix("")] : [])]
-          : [withSuffix(notice("output is of unsupported format"))];
+          : [withSuffix(notice("output is unsupported"))];
 
     return { content, failed: stopped || status !== 0 || !format };
   } finally {
