@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { closeSync, existsSync, openSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { notice, type TextBlock, type ToolCall, type ToolResult, type ToolSchema } from "./types";
+import { notice, type ImageBlock, type TextBlock, type ToolCall, type ToolResult, type ToolSchema } from "./types";
 
 const MAX_OUTPUT_CHARS = 20_000;
 const MAX_IMAGE_PIXELS = 2_000;
@@ -17,8 +17,8 @@ export const BASH_TOOL: ToolSchema = {
   name: "bash",
   description:
     "Run a shell command in the working directory. " +
-    `Output is truncated at ${MAX_OUTPUT_CHARS.toLocaleString("en")} characters (full output saved to a file), or returned as an image fit within ${MAX_IMAGE_PIXELS.toLocaleString("en")} pixels. ` +
-    `Default timeout is ${DEFAULT_TIMEOUT}s; pass timeout (seconds) for longer or shorter commands.`,
+    "Output is returned as text or image. " +
+    `Default timeout is ${DEFAULT_TIMEOUT}s.`,
   parameters: {
     type: "object",
     properties: {
@@ -29,20 +29,35 @@ export const BASH_TOOL: ToolSchema = {
   },
 };
 
-// Any image becomes one WebP that fits every provider, however many images follow it.
-const toImage = (raw: Buffer) =>
-  new Bun.Image(raw)
-    .resize(MAX_IMAGE_PIXELS, MAX_IMAGE_PIXELS, { fit: "inside", withoutEnlargement: true })
-    .webp()
-    .toBase64()
-    .catch(() => undefined);
+// The image formats every provider accepts.
+const IMAGE_FORMATS = ["png", "jpeg", "gif", "webp"];
 
-function truncateOutput(text: string, path: string) {
+// Output as the model sees it, and whether that is all of it.
+type Read = [TextBlock | ImageBlock, boolean];
+
+const withheld = (why: string, path: string, shown = ""): Read => [
+  { type: "text", text: [shown, notice(`${why}, full output in ${path}`)].filter(Boolean).join("\n") },
+  false,
+];
+
+function readText(raw: Buffer, path: string): Read {
+  const text = raw.toString("utf8").trimEnd();
+  if (text.length <= MAX_OUTPUT_CHARS) return [{ type: "text", text }, true];
   const cut = text.lastIndexOf("\n", MAX_OUTPUT_CHARS);
   // Avoid splitting a UTF-16 surrogate pair at the slice boundary.
   const shown = text.slice(0, cut > 0 ? cut : MAX_OUTPUT_CHARS).replace(/[\ud800-\udbff]$/, "");
   const omitted = (text.length - shown.length).toLocaleString("en");
-  return `${shown}\n${notice(`${omitted} characters not shown, full output in ${path}`)}`;
+  return withheld(`${omitted} characters not shown`, path, shown);
+}
+
+async function readImage(raw: Buffer, path: string): Promise<Read> {
+  const image = await new Bun.Image(raw).metadata().catch(() => undefined);
+  if (!image || !IMAGE_FORMATS.includes(image.format)) return withheld("output is of unsupported format", path);
+  const { width, height, format } = image;
+  const max = MAX_IMAGE_PIXELS.toLocaleString("en");
+  if (Math.max(width, height) > MAX_IMAGE_PIXELS)
+    return withheld(`image is ${width}×${height}, over ${max} pixels`, path);
+  return [{ type: "image", data: raw.toString("base64"), mimeType: `image/${format}` }, true];
 }
 
 export async function runBash(cwd: string, call: ToolCall, signal: AbortSignal) {
@@ -84,28 +99,20 @@ export async function runBash(cwd: string, call: ToolCall, signal: AbortSignal) 
   signal.addEventListener("abort", stop, { once: true });
   if (signal.aborted) stop();
 
-  let truncated = false;
+  let whole = true;
   try {
     const [status] = await once(child, "exit");
     const raw = readFileSync(outPath);
-    const isText = isUtf8(raw);
-    const image = isText ? undefined : await toImage(raw);
-    const text = raw.toString("utf8").trimEnd();
-    truncated = isText && text.length > MAX_OUTPUT_CHARS;
+    let block: TextBlock | ImageBlock;
+    [block, whole] = isUtf8(raw) ? readText(raw, outPath) : await readImage(raw, outPath);
 
     const suffix = timedOut ? notice(`timeout after ${timeout}s`) : "";
-    const withSuffix = (body: string): TextBlock => ({
-      type: "text",
-      text: [body, suffix].filter(Boolean).join("\n"),
-    });
+    const content: ToolResult["content"] =
+      block.type === "text"
+        ? [{ type: "text", text: [block.text, suffix].filter(Boolean).join("\n") }]
+        : [block, ...(suffix ? [{ type: "text" as const, text: suffix }] : [])];
 
-    const content: ToolResult["content"] = isText
-      ? [withSuffix(truncated ? truncateOutput(text, outPath) : text)]
-      : image
-        ? [{ type: "image", data: image, mimeType: "image/webp" }, ...(suffix ? [withSuffix("")] : [])]
-        : [withSuffix(notice("output is of unsupported format"))];
-
-    return { content, failed: stopped || status !== 0 || !(isText || image) };
+    return { content, failed: stopped || status !== 0 };
   } finally {
     clearTimeout(timeoutTimer);
     clearTimeout(graceTimer);
@@ -113,6 +120,6 @@ export async function runBash(cwd: string, call: ToolCall, signal: AbortSignal) 
     // Reap any grandchildren left in the process group after cancel/timeout.
     if (stopped) killGroup("SIGKILL");
     closeSync(outFd);
-    if (!truncated) rmSync(outPath);
+    if (whole) rmSync(outPath);
   }
 }
