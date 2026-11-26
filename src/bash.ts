@@ -9,6 +9,7 @@ import { notice, type TextBlock, type ToolCall, type ToolResult, type ToolSchema
 
 const MAX_OUTPUT_CHARS = 20_000;
 const MAX_IMAGE_PIXELS = 2_000;
+const OUTPUT_LIMITS = `text up to ${MAX_OUTPUT_CHARS} characters or images up to ${MAX_IMAGE_PIXELS}px`;
 const DEFAULT_TIMEOUT = 30;
 const KILL_GRACE_MS = 1_000;
 const MAX_TIMER_MS = 0x7fffffff;
@@ -95,7 +96,7 @@ export async function runBash(cwd: string, call: ToolCall, signal: AbortSignal) 
         ? [withSuffix(text)]
         : format
           ? [{ type: "image", data: raw.toString("base64"), mimeType: format }, ...(suffix ? [withSuffix("")] : [])]
-          : [withSuffix(notice(`output saved to ${outPath}`))];
+          : [withSuffix(notice(`output saved to ${outPath}, only ${OUTPUT_LIMITS} are returned`))];
 
     return { content, failed: stopped || status !== 0 };
   } finally {
