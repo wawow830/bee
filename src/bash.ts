@@ -96,7 +96,7 @@ export async function runBash(cwd: string, call: ToolCall, signal: AbortSignal) 
         ? [withSuffix(text)]
         : format
           ? [{ type: "image", data: raw.toString("base64"), mimeType: format }, ...(suffix ? [withSuffix("")] : [])]
-          : [withSuffix(notice(`output saved to ${outPath}, limits are ${MAX_CHARS} characters and ${MAX_PIXELS}px`))];
+          : [withSuffix(notice(outPath))];
 
     return { content, failed: stopped || status !== 0 };
   } finally {
