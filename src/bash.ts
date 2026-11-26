@@ -18,6 +18,7 @@ export const BASH_TOOL: ToolSchema = {
   description:
     "Run a shell command in the working directory. " +
     "Output is text or image. " +
+    `Limits are ${MAX_CHARS} chars and ${MAX_PIXELS}px. ` +
     `Default timeout is ${DEFAULT_TIMEOUT}s.`,
   parameters: {
     type: "object",
