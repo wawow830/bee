@@ -17,7 +17,8 @@ export const BASH_TOOL: ToolSchema = {
   name: "bash",
   description:
     "Run a shell command in the working directory. " +
-    `Output is returned as text or image up to ${MAX_IMAGE_PIXELS}px. ` +
+    `Output is returned as text up to ${MAX_OUTPUT_CHARS.toLocaleString("en")} characters ` +
+    `or image up to ${MAX_IMAGE_PIXELS.toLocaleString("en")} pixels a side, else saved to a file. ` +
     `Default timeout is ${DEFAULT_TIMEOUT}s.`,
   parameters: {
     type: "object",
@@ -30,14 +31,6 @@ export const BASH_TOOL: ToolSchema = {
 };
 
 const IMAGE_FORMATS = ["png", "jpeg", "gif", "webp"];
-
-function truncateOutput(text: string, path: string) {
-  const cut = text.lastIndexOf("\n", MAX_OUTPUT_CHARS);
-  // Avoid splitting a UTF-16 surrogate pair at the slice boundary.
-  const shown = text.slice(0, cut > 0 ? cut : MAX_OUTPUT_CHARS).replace(/[\ud800-\udbff]$/, "");
-  const omitted = (text.length - shown.length).toLocaleString("en");
-  return `${shown}\n${notice(`${omitted} characters not shown, full output in ${path}`)}`;
-}
 
 export async function runBash(cwd: string, call: ToolCall, signal: AbortSignal) {
   const { command, timeout = DEFAULT_TIMEOUT } = call.arguments;
@@ -78,16 +71,19 @@ export async function runBash(cwd: string, call: ToolCall, signal: AbortSignal) 
   signal.addEventListener("abort", stop, { once: true });
   if (signal.aborted) stop();
 
-  let truncated = false;
+  let saved = false;
   try {
     const [status] = await once(child, "exit");
     const raw = readFileSync(outPath);
-    const image = await new Bun.Image(raw).metadata().catch(() => undefined);
-    const fits =
-      image && IMAGE_FORMATS.includes(image.format) && Math.max(image.width, image.height) <= MAX_IMAGE_PIXELS;
-    const format = isUtf8(raw) ? "text" : fits ? `image/${image.format}` : undefined;
     const text = raw.toString("utf8").trimEnd();
-    truncated = format === "text" && text.length > MAX_OUTPUT_CHARS;
+    const image = await new Bun.Image(raw).metadata().catch(() => undefined);
+    const format =
+      isUtf8(raw) && text.length <= MAX_OUTPUT_CHARS
+        ? "text"
+        : image && IMAGE_FORMATS.includes(image.format) && Math.max(image.width, image.height) <= MAX_IMAGE_PIXELS
+          ? `image/${image.format}`
+          : undefined;
+    saved = !format;
 
     const suffix = timedOut ? notice(`timeout after ${timeout}s`) : "";
     const withSuffix = (body: string): TextBlock => ({
@@ -97,12 +93,12 @@ export async function runBash(cwd: string, call: ToolCall, signal: AbortSignal) 
 
     const content: ToolResult["content"] =
       format === "text"
-        ? [withSuffix(truncated ? truncateOutput(text, outPath) : text)]
+        ? [withSuffix(text)]
         : format
           ? [{ type: "image", data: raw.toString("base64"), mimeType: format }, ...(suffix ? [withSuffix("")] : [])]
-          : [withSuffix(notice("output is unsupported"))];
+          : [withSuffix(notice(`output saved to ${outPath}`))];
 
-    return { content, failed: stopped || status !== 0 || !format };
+    return { content, failed: stopped || status !== 0 };
   } finally {
     clearTimeout(timeoutTimer);
     clearTimeout(graceTimer);
@@ -110,6 +106,6 @@ export async function runBash(cwd: string, call: ToolCall, signal: AbortSignal) 
     // Reap any grandchildren left in the process group after cancel/timeout.
     if (stopped) killGroup("SIGKILL");
     closeSync(outFd);
-    if (!truncated) rmSync(outPath);
+    if (!saved) rmSync(outPath);
   }
 }
