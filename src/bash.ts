@@ -17,9 +17,8 @@ export const BASH_TOOL: ToolSchema = {
   name: "bash",
   description:
     "Run a shell command in the working directory. " +
-    `Output is returned as text up to ${MAX_OUTPUT_CHARS.toLocaleString("en")} characters ` +
-    `or image up to ${MAX_IMAGE_PIXELS.toLocaleString("en")} pixels a side, else saved to a file. ` +
-    `Default timeout is ${DEFAULT_TIMEOUT}s.`,
+    `Output: text ≤ ${MAX_OUTPUT_CHARS} chars, image ≤ ${MAX_IMAGE_PIXELS}px, else a file. ` +
+    `Timeout: ${DEFAULT_TIMEOUT}s.`,
   parameters: {
     type: "object",
     properties: {
